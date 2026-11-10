@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stock AI</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #6b7385; --border: #e3e6ec;
+  --accent: #2f6fed; --accent-text: #ffffff; --up: #16a34a; --down: #dc2626; --chip: #eef1f6;
+  --code-bg: #f1f3f7;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1218; --panel: #171b23; --text: #e6e9ef; --muted: #8b93a5; --border: #262c38;
+    --accent: #5b8cff; --accent-text: #0b0e14; --up: #22c55e; --down: #f05252; --chip: #222837;
+    --code-bg: #1e2430;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 12px 16px;
+  background: var(--panel); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 5; }
+header .brand { font-weight: 700; margin-right: 8px; }
+input, select, button { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 7px 10px; }
+input#symbol { width: 120px; text-transform: uppercase; }
+input#question { flex: 1; min-width: 160px; }
+button { cursor: pointer; }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+button:disabled { opacity: .55; cursor: wait; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; background: transparent; padding: 7px 12px; }
+.seg button.on { background: var(--chip); font-weight: 600; }
+main { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 14px; padding: 14px 16px; }
+@media (max-width: 980px) { main { grid-template-columns: 1fr; } }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; min-width: 0; }
+.card h3 { margin: 0 0 8px; font-size: 13px; color: var(--muted); font-weight: 600; }
+.quote { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: baseline; margin-bottom: 8px; }
+.quote .px { font-size: 24px; font-weight: 700; }
+.up { color: var(--up); } .down { color: var(--down); }
+.muted { color: var(--muted); }
+#chart { height: 420px; }
+.tfs { display: flex; gap: 4px; margin: 6px 0; flex-wrap: wrap; }
+.tfs button { padding: 3px 10px; font-size: 12px; }
+.tfs button.on { background: var(--chip); font-weight: 600; }
+#log { font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 260px; overflow: auto; white-space: pre-wrap; }
+#log .ok { color: var(--up); } #log .err { color: var(--down); } #log .st { color: var(--muted); }
+#report { overflow-wrap: anywhere; }
+#report table { border-collapse: collapse; margin: 8px 0; display: block; overflow-x: auto; }
+#report th, #report td { border: 1px solid var(--border); padding: 4px 8px; }
+#report th { background: var(--chip); }
+#report pre { background: var(--code-bg); padding: 10px; border-radius: 8px; overflow-x: auto; }
+#report code { font-size: 12px; }
+#report h1, #report h2 { font-size: 18px; margin: 18px 0 8px; } #report h3 { font-size: 15px; }
+details summary { cursor: pointer; color: var(--muted); }
+.hist { display: flex; flex-direction: column; gap: 4px; max-height: 340px; overflow: auto; }
+.hist button { text-align: left; background: transparent; border: 1px solid var(--border); display: flex; gap: 8px;
+  justify-content: space-between; align-items: center; }
+.hist button:hover { background: var(--chip); }
+.chip { background: var(--chip); padding: 1px 7px; border-radius: 6px; font-size: 12px; }
+.meta { font-size: 12px; color: var(--muted); margin-top: 8px; }
+.warn { color: var(--down); font-size: 13px; }
+.empty { color: var(--muted); padding: 30px 0; text-align: center; }
+.col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">📈 Stock AI</span>
+  <input id="symbol" placeholder="NVDA / BTC" value="NVDA" aria-label="标的代码">
+  <div class="seg" id="mode">
+    <button data-v="short">短线</button><button data-v="long">长线</button><button data-v="both" class="on">综合</button>
+  </div>
+  <select id="provider" aria-label="AI 提供方"></select>
+  <input id="question" placeholder="可选：特别关心的问题，例如 财报前要不要减仓">
+  <button id="load">看图</button>
+  <button id="go" class="primary">AI 分析</button>
+</header>
+
+<main>
+  <div class="col">
+    <div class="card">
+      <div class="quote" id="quote"><span class="muted">输入代码后点"看图"</span></div>
+      <div class="tfs" id="tfs">
+        <button data-v="15m">15分</button><button data-v="1h">1时</button><button data-v="4h">4时</button>
+        <button data-v="1d" class="on">日线</button><button data-v="1wk">周线</button>
+        <span class="muted" style="font-size:12px;align-self:center;margin-left:6px">虚线：绿=支撑 红=压力（代码计算）</span>
+      </div>
+      <div id="chart"></div>
+    </div>
+    <div class="card">
+      <h3>分析进度（AI 调用的数据工具）</h3>
+      <div id="log" class="muted">尚未开始</div>
+    </div>
+    <div class="card">
+      <h3>历史分析</h3>
+      <div class="hist" id="hist"></div>
+    </div>
+  </div>
+  <div class="card">
+    <h3>分析报告</h3>
+    <div id="report"><div class="empty">点击"AI 分析"生成报告</div></div>
+    <div id="meta" class="meta"></div>
+  </div>
+</main>
+
+<script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+<script src="/static/vendor/marked.min.js"></script>
+<script src="/static/vendor/purify.min.js"></script>
+<script>
+const $ = (s) => document.querySelector(s);
+const state = { mode: "both", tf: "1d", chart: null, candle: null, vol: null, mas: [], lines: [], qSeq: 0, cSeq: 0 };
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function seg(el, key, cb) {
+  el.addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    el.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+    state[key] = b.dataset.v; cb && cb();
+  });
+}
+seg($("#mode"), "mode");
+seg($("#tfs"), "tf", () => loadChart());
+
+function initChart() {
+  const el = $("#chart");
+  state.chart = LightweightCharts.createChart(el, {
+    autoSize: true,
+    layout: { background: { color: "transparent" }, textColor: css("--muted") },
+    grid: { vertLines: { color: css("--border") }, horzLines: { color: css("--border") } },
+    timeScale: { timeVisible: true, borderColor: css("--border") },
+    rightPriceScale: { borderColor: css("--border") },
+    crosshair: { mode: 0 },
+  });
+  state.candle = state.chart.addCandlestickSeries({
+    upColor: css("--up"), downColor: css("--down"), borderVisible: false,
+    wickUpColor: css("--up"), wickDownColor: css("--down"),
+  });
+  state.vol = state.chart.addHistogramSeries({ priceFormat: { type: "volume" }, priceScaleId: "vol",
+    lastValueVisible: false, priceLineVisible: false });
+  state.chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+}
+
+async function api(url) {
+  const r = await fetch(url);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.detail || j.error || r.statusText);
+  return j;
+}
+
+async function loadQuote() {
+  const sym = $("#symbol").value.trim(); if (!sym) return;
+  const seq = ++state.qSeq;  // 只渲染最后一次请求，防止慢请求覆盖新结果
+  try {
+    const d = await api(`/api/quote?symbol=${encodeURIComponent(sym)}`);
+    if (seq !== state.qSeq) return;
+    const q = d.quote, chg = q.change_pct ?? q.change_24h_pct;
+    const cls = (chg ?? 0) >= 0 ? "up" : "down";
+    const vr = q.volume_vs_3m_avg != null ? Number(q.volume_vs_3m_avg).toFixed(2) : "-";
+    const extra = d.asset.asset_type === "crypto"
+      ? `24h ${q.low_24h} - ${q.high_24h} · 成交 ${q.volume_24h_usdt ?? "-"} · 市值 ${q.market_cap ?? "-"}`
+      : `52周 ${q["52w_range"]?.join(" - ")} · 市值 ${q.market_cap ?? "-"} · 量比 ${vr}`;
+    $("#quote").innerHTML = `<b>${esc(d.asset.symbol)}</b><span class="muted">${esc(q.name || d.asset.name || "")}</span>
+      <span class="px">${esc(q.price)}</span><span class="${cls}">${chg >= 0 ? "+" : ""}${esc(chg)}%</span>
+      <span class="muted">${esc(extra)}</span>`;
+  } catch (e) { if (seq === state.qSeq) $("#quote").innerHTML = `<span class="warn">${esc(e.message)}</span>`; }
+}
+
+async function loadChart() {
+  const sym = $("#symbol").value.trim(); if (!sym) return;
+  if (!state.chart) initChart();
+  const seq = ++state.cSeq;
+  try {
+    const d = await api(`/api/chart?symbol=${encodeURIComponent(sym)}&interval=${state.tf}`);
+    if (seq !== state.cSeq) return;
+    state.candle.setData(d.candles);
+    state.vol.setData(d.volume);
+    state.mas.forEach((s) => state.chart.removeSeries(s)); state.mas = [];
+    const colors = { ma20: "#f59e0b", ma50: "#8b5cf6", ma200: "#0ea5e9" };
+    for (const [k, pts] of Object.entries(d.ma)) {
+      const s = state.chart.addLineSeries({ color: colors[k], lineWidth: 1, priceLineVisible: false,
+        lastValueVisible: false, title: k.toUpperCase() });
+      s.setData(pts); state.mas.push(s);
+    }
+    state.lines.forEach((l) => state.candle.removePriceLine(l)); state.lines = [];
+    for (const [p, n] of d.levels.support || [])
+      state.lines.push(state.candle.createPriceLine({ price: p, color: css("--up"), lineStyle: 2, lineWidth: 1, title: `S×${n}` }));
+    for (const [p, n] of d.levels.resistance || [])
+      state.lines.push(state.candle.createPriceLine({ price: p, color: css("--down"), lineStyle: 2, lineWidth: 1, title: `R×${n}` }));
+    const n = d.candles.length;
+    state.chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 160), to: n + 3 });
+  } catch (e) { if (seq === state.cSeq) $("#quote").insertAdjacentHTML("beforeend", ` <span class="warn">图表：${esc(e.message)}</span>`); }
+}
+
+function renderReport(md) {
+  const html = DOMPurify.sanitize(marked.parse(md || ""));
+  const box = $("#report"); box.innerHTML = html;
+  // 把最后的 json 记录块折叠起来
+  const codes = box.querySelectorAll("pre > code.language-json");
+  if (codes.length) {
+    const pre = codes[codes.length - 1].parentElement;
+    const det = document.createElement("details");
+    det.innerHTML = "<summary>结构化结论（用于回测记录）</summary>";
+    pre.replaceWith(det); det.appendChild(pre);
+  }
+}
+
+function log(html) {
+  const el = $("#log");
+  if (el.classList.contains("muted")) { el.classList.remove("muted"); el.innerHTML = ""; }
+  el.insertAdjacentHTML("beforeend", html + "\n"); el.scrollTop = el.scrollHeight;
+}
+
+function analyze() {
+  const sym = $("#symbol").value.trim(); if (!sym) return;
+  $("#go").disabled = true; $("#log").innerHTML = ""; $("#meta").textContent = "";
+  $("#report").innerHTML = '<div class="empty">AI 正在收集数据和分析，通常需要 1~3 分钟…</div>';
+  const t0 = Date.now();
+  const p = new URLSearchParams({ symbol: sym, mode: state.mode, provider: $("#provider").value, question: $("#question").value });
+  const es = new EventSource(`/api/analyze/stream?${p}`);
+  es.onmessage = (ev) => {
+    const d = JSON.parse(ev.data);
+    if (d.type === "status") log(`<span class="st">${esc(d.text)}</span>`);
+    else if (d.type === "tool_call") log(`→ ${esc(d.name)} <span class="st">${esc(JSON.stringify(d.args)).slice(0, 160)}</span>`);
+    else if (d.type === "tool_result") log(`  <span class="${d.ok ? "ok" : "err"}">${d.ok ? "✓" : "✗"} ${esc(d.name)} ${d.ms}ms</span>`);
+    else if (d.type === "thought") log(`<span class="st">💭 ${esc(d.text.slice(0, 200))}</span>`);
+    else if (d.type === "done") {
+      renderReport(d.text);
+      const u = d.usage || {};
+      $("#meta").innerHTML = `${esc(d.model)} · 输入 ${(u.input_tokens || 0).toLocaleString()} · 输出 ${(u.output_tokens || 0).toLocaleString()}`
+        + (u.cache_read_input_tokens ? ` · 缓存命中 ${u.cache_read_input_tokens.toLocaleString()}` : "")
+        + ` · 工具 ${d.tool_calls} 次 · 用时 ${Math.round((Date.now() - t0) / 1000)}s`
+        + (d.warnings || []).map((w) => `<div class="warn">${esc(w)}</div>`).join("");
+      loadHistory();
+    } else if (d.type === "error") {
+      $("#report").innerHTML = `<div class="warn">${esc(d.text)}</div>`;
+    }
+  };
+  es.onerror = () => { es.close(); $("#go").disabled = false; };
+  es.addEventListener("message", (ev) => {
+    const d = JSON.parse(ev.data);
+    if (d.type === "done" || d.type === "error") { es.close(); $("#go").disabled = false; }
+  });
+  loadQuote(); loadChart();
+}
+
+async function loadHistory() {
+  const rows = await api("/api/history?limit=40").catch(() => []);
+  const box = $("#hist");
+  if (!rows.length) { box.innerHTML = '<div class="muted">暂无记录</div>'; return; }
+  box.innerHTML = rows.map((r) => {
+    const s = r.summary || {}, st = s.short_term || {}, lt = s.long_term || {};
+    const tag = [st.bias && `短:${st.bias}`, lt.rating && `长:${lt.rating}`].filter(Boolean).join(" ");
+    return `<button data-id="${r.id}" data-sym="${esc(r.symbol)}">
+      <span><b>${esc(r.symbol)}</b> <span class="chip">${esc({short: "短线", long: "长线", both: "综合"}[r.mode] || r.mode)}</span>
+      <span class="muted">${esc(r.created_at.slice(0, 16).replace("T", " "))}</span></span>
+      <span class="muted">${esc(tag)}</span></button>`;
+  }).join("");
+}
+
+$("#hist").addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-id]"); if (!b) return;
+  const r = await api(`/api/report/${b.dataset.id}`);
+  renderReport(r.report);
+  $("#meta").textContent = `#${r.id} · ${r.model} · ${r.created_at}（UTC）· 正在评估至今表现…`;
+  $("#symbol").value = b.dataset.sym; loadQuote(); loadChart();
+  const ev = await api(`/api/history/${b.dataset.id}/evaluate`).catch(() => ({}));
+  $("#meta").textContent = `#${r.id} · ${r.model} · ${r.created_at}（UTC）` +
+    (ev["return_%"] != null ? ` · 至今 ${ev["return_%"]}%（现价 ${ev.now}）` : "") +
+    (ev.short_outcome ? ` · 短线计划结果：${ev.short_outcome}` : "");
+});
+
+async function loadProviders() {
+  const d = await api("/api/providers");
+  $("#provider").innerHTML = d.providers.map((p) =>
+    `<option value="${esc(p.name)}" ${p.name === d.default ? "selected" : ""}>${esc(p.name)} · ${esc(p.model)}${p.ready ? "" : "（未配置Key）"}</option>`).join("");
+}
+
+$("#go").addEventListener("click", analyze);
+$("#load").addEventListener("click", () => { loadQuote(); loadChart(); });
+$("#symbol").addEventListener("keydown", (e) => { if (e.key === "Enter") { loadQuote(); loadChart(); } });
+loadProviders(); loadHistory(); loadQuote(); loadChart();
+</script>
+</body>
+</html>

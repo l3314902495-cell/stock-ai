@@ -1,0 +1,76 @@
+# 复制为 config.yaml 后修改。密钥不要写在这里，写在 .env 里（这里只写变量名）。
+
+llm:
+  default: claude          # 默认使用哪个 provider，命令行可用 -p 切换
+
+  providers:
+    # ---- Claude 官方 API（Anthropic 格式）----
+    claude:
+      type: anthropic
+      model: claude-opus-5-5
+      api_key_env: ANTHROPIC_API_KEY
+      effort: high           # low / medium / high / xhigh / max，越高越深入、越贵
+      max_tokens: 16000
+      # 官方 API 默认开启：提示缓存、服务端拒答回退（server_fallback）
+
+    # ---- Anthropic 格式的中转站 ----
+    claude_relay:
+      type: anthropic
+      base_url: https://your-relay.example.com   # 中转站地址（不带 /v1/messages）
+      model: claude-opus-5-5                       # 以中转站支持的模型名为准
+      api_key_env: RELAY_API_KEY
+      effort: high
+      # 中转站不支持某些参数时，程序会自动去掉重试；也可以手动关闭：
+      # prompt_cache: false
+      # effort: null
+      # server_fallback: false
+
+    # ---- OpenAI 兼容格式（需要模型支持 function calling）----
+    # 下面的模型名只是示例，请以各服务商当前文档为准
+    deepseek:
+      type: openai
+      base_url: https://api.deepseek.com
+      model: deepseek-chat
+      api_key_env: DEEPSEEK_API_KEY
+
+    qwen:
+      type: openai
+      base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      model: qwen-plus
+      api_key_env: DASHSCOPE_API_KEY
+
+    openai_relay:
+      type: openai
+      base_url: https://your-openai-relay.example.com/v1
+      model: gpt-4o
+      api_key_env: OPENAI_RELAY_KEY
+      # max_tokens: 8000
+      # extra_body: {}        # 透传服务商特有参数
+
+    # 本地 Ollama（免费，但小模型的工具调用和分析质量有限）
+    # ollama:
+    #   type: openai
+    #   base_url: http://localhost:11434/v1
+    #   model: qwen2.5:14b
+    #   api_key_env: OLLAMA_KEY   # 随便填，Ollama 不校验
+
+    # 每个 provider 都可以单独配置代理（例如访问海外 API）：
+    #   proxy: http://127.0.0.1:7890
+
+network:
+  # 访问 Yahoo / OKX / CoinGecko / SEC 等数据源的代理。在中国大陆通常需要。
+  # 不填则使用环境变量 HTTPS_PROXY（如果有）。
+  proxy: null              # 例如 http://127.0.0.1:7890
+
+data:
+  crypto_exchange: okx     # ccxt 交易所 id：okx / bybit / kraken / binance（部分地区受限）
+  # SEC 要求 User-Agent 带联系方式，请改成你自己的（名字 + 邮箱）
+  sec_user_agent: "stock-ai personal-research your-email@example.com"
+
+cache:
+  path: ~/.stock-ai/cache.db
+
+journal:
+  path: ~/.stock-ai/journal.db
+
+reports_dir: ./reports
