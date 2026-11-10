@@ -72,18 +72,22 @@ def _stock(ticker: str, info: dict[str, Any] | None = None) -> dict[str, Any]:
 def _yf_validate(ticker: str) -> dict[str, Any] | None:
     import yfinance as yf
 
+    from .data.us_stock import yfx
+
     try:
-        h = yf.Ticker(ticker).history(period="5d", interval="1d", auto_adjust=False)
+        h = yfx(lambda: yf.Ticker(ticker).history(period="5d", interval="1d", auto_adjust=False))
         if h is None or h.empty:
             return None
     except Exception:
         return None
     info: dict[str, Any] = {}
     try:
-        raw = yf.Ticker(ticker).info or {}
+        raw = yfx(lambda: yf.Ticker(ticker).info, retries=2) or {}
         info = {k: raw.get(k) for k in ("quoteType", "shortName", "longName", "exchange", "sector", "industry")}
     except Exception:
         pass
+    if not info.get("quoteType"):  # info 没取到（限流）：结果可用，但不要缓存 7 天
+        info["_nocache"] = True
     return info
 
 
@@ -91,8 +95,10 @@ def _yf_validate(ticker: str) -> dict[str, Any] | None:
 def _yf_search(query: str) -> list[dict[str, Any]]:
     import yfinance as yf
 
+    from .data.us_stock import yfx
+
     try:
-        quotes = yf.Search(query, max_results=8).quotes
+        quotes = yfx(lambda: yf.Search(query, max_results=8).quotes)
     except Exception:
         return []
     return [

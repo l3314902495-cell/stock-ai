@@ -79,3 +79,77 @@ def test_num_pct():
     assert num(float("nan")) is None
     assert num(0.000012345678) == 0.000012346
     assert pct(0.12345) == 12.35
+
+
+# ---------------------------------------------------------------- review 回放逻辑
+from stockai.journal import _horizon_days, evaluate_plan  # noqa: E402
+from stockai.verify import check  # noqa: E402
+
+
+def _bars(rows, start="2026-01-01 00:00"):
+    idx = pd.date_range(start, periods=len(rows), freq="h", tz="UTC")
+    return pd.DataFrame(rows, columns=["Open", "High", "Low", "Close"], index=idx)
+
+
+T0 = pd.Timestamp("2025-12-31 23:00", tz="UTC")
+PLAN = {"bias": "看多", "entry": [95, 97], "stop": 90, "targets": [110, 120], "horizon": "1-2周"}
+
+
+def test_horizon_days():
+    assert _horizon_days("1-3周") == 21 and _horizon_days("5天") == 5 and _horizon_days("2个月") == 60
+    assert _horizon_days(None) is None
+
+
+def test_plan_not_filled_when_price_never_reaches_entry():
+    bars = _bars([[100, 112, 99, 111]])  # 直接涨到目标，但从未回到 95-97 入场区
+    r = evaluate_plan(PLAN, bars, 100, T0, now=T0 + pd.Timedelta(days=1))
+    assert r["outcome"] == "等待入场"
+    r = evaluate_plan(PLAN, bars, 100, T0, now=T0 + pd.Timedelta(days=30))
+    assert r["outcome"] == "未触发入场（已过期）"
+
+
+def test_plan_filled_then_target():
+    bars = _bars([[100, 100, 96, 97], [97, 105, 96, 104], [104, 111, 103, 110]])
+    r = evaluate_plan(PLAN, bars, 100, T0, now=T0 + pd.Timedelta(days=1))
+    assert r["outcome"] == "到达目标1" and r["r_multiple"] == round((110 - 96) / 6, 2)
+
+
+def test_plan_filled_then_stop_and_short_side():
+    bars = _bars([[96, 97, 95, 96], [96, 96, 89, 90]])
+    assert evaluate_plan(PLAN, bars, 100, T0)["outcome"] == "止损"
+    short = {"bias": "看空", "entry": 100, "stop": 105, "targets": [90], "horizon": "1周"}
+    bars = _bars([[100, 101, 99, 100], [100, 100, 89, 90]])
+    r = evaluate_plan(short, bars, 100, T0)
+    assert r["outcome"] == "到达目标1" and r["r_multiple"] == 2.0
+
+
+def test_plan_expires_at_close():
+    bars = _bars([[96, 97, 95, 96]] + [[100, 101, 99, 100]] * 200)  # 入场后一直横盘，超过 1 周
+    r = evaluate_plan({**PLAN, "horizon": "1周"}, bars, 96, T0)
+    assert r["outcome"] == "到期平仓" and r["r_multiple"] == round((100 - 96) / 6, 2)
+
+
+def test_verify_units_and_skips():
+    tools = ['{"price": 178.67, "market_cap": "4.31T", "oi": "2.61B", "ratio": 0.92757}']
+    rep = "现价 178.67，市值 4.31 万亿，持仓 26.1 亿，流通率 92.8%。MA20、RSI14、4h、1-3周、2026-11-17 不算。编造 49.5"
+    v = check(rep, tools)
+    assert v["checked"] == 5 and v["verified"] == 4 and v["unverified"][0]["text"] == "49.5"
+
+
+def test_cache_skips_nocache(tmp_path):
+    from stockai import cache, config
+
+    (tmp_path / "c.yaml").write_text(f'{{"cache": {{"path": "{tmp_path / "c.db"}"}}}}')
+    config.load_config(str(tmp_path / "c.yaml"))
+    cache._conn = None
+    calls = []
+
+    @cache.cached(ttl=60)
+    def f(x):
+        calls.append(x)
+        return {"v": x, "_nocache": True} if x == "bad" else {"v": x}
+
+    assert f("bad") == {"v": "bad"} and f("bad") == {"v": "bad"}
+    assert f("ok") == {"v": "ok"} and f("ok") == {"v": "ok"}
+    assert calls == ["bad", "bad", "ok"]
+    cache._conn = None

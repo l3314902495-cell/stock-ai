@@ -5,7 +5,9 @@
   stockai chat                           多轮对话，AI 按需查数据
   stockai quote NVDA BTC SOL             快速报价（不调用 AI）
   stockai data technicals NVDA           直接查看某个工具的原始输出（调试用，不调用 AI）
-  stockai review                         回看历史分析的结果
+  stockai scan                           扫描自选股（不调用 AI），--ai-top 3 对前三名做 AI 分析
+  stockai alerts list|add|watch          价位提醒（AI 结论会自动生成提醒）
+  stockai review / stats                 回看历史分析 / 统计胜率
   stockai providers                      查看已配置的 AI
   stockai web                            启动本地网页
 """
@@ -40,25 +42,48 @@ def _printer(verbose: bool):
     return on_event
 
 
-def _usage_line(turn) -> str:
+def _usage_line(turn, cost=None) -> str:
+    from .pricing import fmt
+
     u = turn.usage
     parts = [f"模型 {turn.model}", f"输入 {u.get('input_tokens', 0):,}", f"输出 {u.get('output_tokens', 0):,}"]
     if u.get("cache_read_input_tokens"):
         parts.append(f"缓存命中 {u['cache_read_input_tokens']:,}")
+    if u.get("web_search_requests"):
+        parts.append(f"网络搜索 {u['web_search_requests']} 次")
     parts.append(f"工具调用 {len(turn.tool_calls)} 次")
+    if cost is not None or turn.usage:
+        parts.append(fmt(cost))
     return " | ".join(parts)
+
+
+def _print_verify(v: dict) -> None:
+    if not v or not v.get("checked"):
+        return
+    ratio = v["ratio"] or 0
+    color = "green" if ratio >= 0.9 else ("yellow" if ratio >= 0.75 else "red")
+    console.print(f"[{color}]数字核对：{v['verified']}/{v['checked']} 个数字能在工具数据中找到（{ratio:.0%}）[/{color}]")
+    for u in v.get("unverified", [])[:12]:
+        console.print(f"  [yellow]? {u['text']}[/yellow] [dim]…{u['context']}…[/dim]")
+    if v.get("unverified"):
+        console.print("  [dim]找不到 ≠ 一定是编造（可能是 AI 推算或来自网络搜索），但值得核实[/dim]")
 
 
 def cmd_analyze(a):
     from .agent import analyze
 
-    res = analyze(a.symbol, a.mode, a.provider, a.question, save=not a.no_save, on_event=_printer(a.verbose))
+    res = analyze(a.symbol, a.mode, a.provider, a.question, save=not a.no_save,
+                  critic=True if a.critic else None, on_event=_printer(a.verbose))
     console.rule(f"{res.symbol} · {a.mode}")
     console.print(Markdown(res.turn.text or "（没有输出）"))
+    if res.critic_notes:
+        console.rule("审稿意见")
+        console.print(Markdown(res.critic_notes))
     console.rule()
     for w in res.turn.warnings:
         console.print(f"[red]注意：{w}[/red]")
-    console.print(f"[dim]{_usage_line(res.turn)}[/dim]")
+    _print_verify(res.verify)
+    console.print(f"[dim]{_usage_line(res.turn, res.cost)}[/dim]")
     if res.report_path:
         console.print(f"[dim]报告已保存：{res.report_path}（日志 #{res.journal_id}）[/dim]")
 
@@ -134,23 +159,115 @@ def cmd_review(a):
     if not rows:
         console.print("还没有分析记录。先运行 stockai analyze XXX")
         return
-    t = Table("#", "时间(UTC)", "标的", "模式", "当时价", "现价", "至今%", "短线判断", "止损/目标", "短线结果", "长线评级")
+    t = Table("#", "时间(UTC)", "标的", "模式", "当时价", "现价", "至今%", "短线", "入场/止损/目标", "短线结果", "R", "长线", "核对")
     for r in rows:
-        s = r["summary"] or {}
-        st = s.get("short_term") or {}
-        lt = s.get("long_term") or {}
+        s_ = r["summary"] or {}
+        st = s_.get("short_term") or {}
+        lt = s_.get("long_term") or {}
         try:
             ev = journal.evaluate(r)
         except Exception as e:
             ev = {"note": str(e)[:40]}
         ret = ev.get("return_%")
         color = "green" if (ret or 0) >= 0 else "red"
-        t.add_row(str(r["id"]), r["created_at"][:16].replace("T", " "), r["symbol"], r["mode"], str(r["price"] or "-"),
+        plan = f"{st.get('entry')}/{st.get('stop')}/{st.get('targets')}" if st else "-"
+        vr = r.get("verify_ratio")
+        t.add_row(str(r["id"]), r["created_at"][5:16].replace("T", " "), r["symbol"], r["mode"], str(r["price"] or "-"),
                   str(ev.get("now", "-")), f"[{color}]{ret}[/{color}]" if ret is not None else "-",
-                  st.get("bias") or "-", f"{st.get('stop')}/{st.get('targets')}" if st else "-",
-                  ev.get("short_outcome") or ev.get("note") or "-", lt.get("rating") or "-")
+                  st.get("bias") or "-", plan, ev.get("short_outcome") or ev.get("note") or "-",
+                  str(ev.get("short_r") if ev.get("short_r") is not None else "-"), lt.get("rating") or "-",
+                  f"{vr:.0%}" if vr is not None else "-")
     console.print(t)
-    console.print("[dim]短线结果按分析之后的 1 小时 K 线判断先触及止损还是目标 1。查看完整报告：stockai show 编号</dim>")
+    console.print("[dim]短线结果：先判断价格是否进入入场区间，再看先触及止损还是目标；超过 horizon 未结束按收盘价计算。"
+                  "查看完整报告：stockai show 编号；汇总统计：stockai stats[/dim]")
+
+
+def cmd_stats(a):
+    from . import journal
+
+    with console.status("正在回放历史分析…"):
+        st = journal.stats(a.limit)
+    t = Table("分组", "分析数", "交易计划", "已入场", "未触发", "已结束", "胜率%", "平均R", "至今平均涨跌%")
+    for k, g in st["groups"].items():
+        t.add_row(k, *[str(g[c]) if g[c] is not None else "-" for c in
+                       ("分析数", "交易计划数", "已入场", "未触发入场", "已结束", "胜率_%", "平均R", "至今平均涨跌_%")])
+    console.print(t)
+    if st["long_term_by_rating"]:
+        t2 = Table("长线评级", "数量", "至今平均涨跌%")
+        for k, g in st["long_term_by_rating"].items():
+            t2.add_row(k, str(g["数量"]), str(g["至今平均涨跌_%"]))
+        console.print(t2)
+    console.print(f"[dim]{st['note']}[/dim]")
+
+
+def cmd_scan(a):
+    from . import scanner
+    from .config import get_config
+
+    syms = a.symbols or (get_config().get("watchlists") or {}).get(a.watchlist) or []
+    if not syms:
+        console.print(f"自选列表 '{a.watchlist}' 为空，在 config.yaml 的 watchlists 下配置，或直接传代码")
+        return
+    with console.status(f"扫描 {len(syms)} 个标的…"):
+        rows = scanner.scan(syms)
+    t = Table("标的", "价格", "1日%", "1月%", "RSI", "关注度", "方向", "信号")
+    for r in rows:
+        if "error" in r:
+            t.add_row(r["symbol"], "-", "-", "-", "-", "-", "-", f"[red]{r['error'][:50]}[/red]")
+            continue
+        d = r["direction"]
+        dc = "green" if d > 0 else ("red" if d < 0 else "white")
+        c1 = "green" if (r["chg_1d_%"] or 0) >= 0 else "red"
+        t.add_row(r["symbol"], str(r["price"]), f"[{c1}]{r['chg_1d_%']}[/{c1}]", str(r["chg_1m_%"]), str(r["rsi14"]),
+                  str(r["attention"]), f"[{dc}]{d:+d}[/{dc}]", "，".join(r["signals"]) or "-")
+    console.print(t)
+    console.print("[dim]关注度=信号数量/强度；方向>0 偏多、<0 偏空。纯代码计算，不调用 AI。[/dim]")
+    if a.ai_top:
+        from .agent import analyze
+
+        top = [r["symbol"] for r in rows if "error" not in r][:a.ai_top]
+        for sym in top:
+            console.rule(f"AI 分析 {sym}")
+            res = analyze(sym, a.mode, a.provider, save=True, on_event=_printer(False))
+            console.print(Markdown(res.turn.text or ""))
+            _print_verify(res.verify)
+            console.print(f"[dim]{_usage_line(res.turn, res.cost)}[/dim]")
+
+
+def cmd_alerts(a):
+    from . import alerts, notify, symbols
+
+    if a.action == "list":
+        rows = alerts.list_alerts(active_only=not a.all)
+        t = Table("#", "标的", "条件", "价位", "说明", "来源", "状态")
+        for r in rows:
+            state = "监控中" if r["active"] else f"已触发 {r['triggered_at'][5:16]} @ {r['triggered_price']}"
+            t.add_row(str(r["id"]), r["symbol"], "≥" if r["cond"] == "above" else "≤", str(r["price"]),
+                      r["note"] or "", r["source"], state)
+        console.print(t if rows else "没有提醒")
+    elif a.action == "add":
+        if not a.symbol or a.cond not in ("above", "below") or a.price is None:
+            console.print("用法：stockai alerts add NVDA below 170 --note 回踩支撑")
+            return
+        s = symbols.resolve(a.symbol)
+        i = alerts.add(s["symbol"], s["asset_type"], a.cond, a.price, a.note or "")
+        console.print(f"已添加提醒 #{i}")
+    elif a.action == "rm":
+        alerts.remove(int(a.symbol))
+        console.print("已删除")
+    elif a.action == "check":
+        fired = alerts.check_once()
+        console.print(f"触发 {len(fired)} 个" + "".join(f"\n  {f['symbol']} {f['cond']} {f['price']} 现价 {f['triggered_price']} {f['notify']}" for f in fired))
+    elif a.action == "watch":
+        from .config import get_config
+
+        iv = a.interval or int(get_config().get("alerts", {}).get("interval", 300))
+        console.print(f"开始监控（每 {iv} 秒检查一次），Ctrl+C 退出")
+        alerts.watch(iv, on_trigger=lambda al, p: console.print(
+            f"[bold yellow]触发：{al['symbol']} {'≥' if al['cond'] == 'above' else '≤'} {al['price']}，现价 {p}。{al['note']}[/bold yellow]"))
+    elif a.action == "test-notify":
+        for r in notify.send("stock-ai 测试", "推送配置正常"):
+            console.print(r)
 
 
 def cmd_show(a):
@@ -160,8 +277,15 @@ def cmd_show(a):
     if not r:
         console.print("找不到该记录")
         return
+    from .pricing import fmt
+
     console.rule(f"#{r['id']} {r['symbol']} {r['mode']} {r['created_at']} {r['model']}")
     console.print(Markdown(r["report"]))
+    if r.get("critic_notes"):
+        console.rule("审稿意见")
+        console.print(Markdown(r["critic_notes"]))
+    _print_verify(r.get("verify") or {})
+    console.print(f"[dim]{fmt(r.get('cost') or None)}[/dim]")
 
 
 def cmd_providers(a):
@@ -180,8 +304,11 @@ def cmd_providers(a):
 def cmd_web(a):
     import uvicorn
 
-    from .web.app import app
+    from .web.app import app, start_alert_watcher
 
+    if a.alerts:
+        start_alert_watcher()
+        console.print("价位提醒监控已在后台运行")
     console.print(f"打开浏览器访问 http://{a.host}:{a.port}")
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
 
@@ -205,6 +332,7 @@ def main(argv=None):
     s.add_argument("-q", "--question", help="额外关心的问题")
     s.add_argument("--no-save", action="store_true", help="不保存报告和日志")
     s.add_argument("-v", "--verbose", action="store_true", help="显示 AI 的中间说明")
+    s.add_argument("--critic", action="store_true", help="追加一轮审稿：挑错并输出修订版（成本约 +30%%）")
     s.set_defaults(fn=cmd_analyze)
 
     s = sub.add_parser("chat", help="多轮对话")
@@ -227,6 +355,28 @@ def main(argv=None):
     s.add_argument("-n", "--limit", type=int, default=20)
     s.set_defaults(fn=cmd_review)
 
+    s = sub.add_parser("scan", help="扫描自选股（纯代码打分，不调用 AI）")
+    s.add_argument("symbols", nargs="*", help="代码列表；不填则用自选列表")
+    s.add_argument("-w", "--watchlist", default="default", help="config.yaml 中 watchlists 的名字")
+    s.add_argument("--ai-top", type=int, default=0, help="对排名前 N 个调用 AI 分析")
+    s.add_argument("-m", "--mode", choices=["short", "long", "both"], default="short")
+    s.add_argument("-p", "--provider")
+    s.set_defaults(fn=cmd_scan)
+
+    s = sub.add_parser("alerts", help="价位提醒：list / add / rm / check / watch / test-notify")
+    s.add_argument("action", choices=["list", "add", "rm", "check", "watch", "test-notify"])
+    s.add_argument("symbol", nargs="?", help="add 时为代码；rm 时为编号")
+    s.add_argument("cond", nargs="?", help="above / below")
+    s.add_argument("price", nargs="?", type=float)
+    s.add_argument("--note")
+    s.add_argument("--all", action="store_true", help="list 时包括已触发的")
+    s.add_argument("--interval", type=int, help="watch 检查间隔秒数")
+    s.set_defaults(fn=cmd_alerts)
+
+    s = sub.add_parser("stats", help="按模型/模式统计历史判断表现")
+    s.add_argument("-n", "--limit", type=int, default=500)
+    s.set_defaults(fn=cmd_stats)
+
     s = sub.add_parser("show", help="查看某条历史报告")
     s.add_argument("id", type=int)
     s.set_defaults(fn=cmd_show)
@@ -237,6 +387,7 @@ def main(argv=None):
     s = sub.add_parser("web", help="启动本地网页界面")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--alerts", action="store_true", help="同时在后台运行价位提醒监控")
     s.set_defaults(fn=cmd_web)
 
     s = sub.add_parser("cache-clear", help="清空数据缓存")

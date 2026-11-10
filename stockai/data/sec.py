@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import re
+
 import pandas as pd
 import requests
 
@@ -86,6 +88,41 @@ def _split_factor_after(splits: pd.Series, date_str: str) -> float:
     return f
 
 
+def quarterly_ttm_eps(facts: dict, splits: pd.Series | None) -> list[dict[str, Any]]:
+    """季度 TTM EPS（已按拆股调整）。SEC 季报没有财年 Q4，用"年报 - 前三季"推算。"""
+    node = facts.get("facts", {}).get("us-gaap", {}).get("EarningsPerShareDiluted")
+    if not node:
+        return []
+    items = [i for unit in node.get("units", {}).values() for i in unit]
+    quarters: dict[pd.Timestamp, float] = {}
+    annuals: list[tuple[pd.Timestamp, float]] = []
+    for it in items:
+        fr = it.get("frame") or ""
+        if "start" not in it:
+            continue
+        days = (pd.Timestamp(it["end"]) - pd.Timestamp(it["start"])).days
+        val = it["val"] / _split_factor_after(splits, it.get("filed", ""))
+        end = pd.Timestamp(it["end"])
+        if re.fullmatch(r"CY\d{4}Q[1-4]", fr) and 80 <= days <= 100:
+            quarters[end] = val
+        elif re.fullmatch(r"CY\d{4}", fr) and 340 <= days <= 380:
+            annuals.append((end, val))
+    # 推算缺失的财年 Q4
+    for end, aval in annuals:
+        if any(abs((end - q).days) <= 10 for q in quarters):
+            continue
+        prior = [v for q, v in quarters.items() if 60 <= (end - q).days <= 300]
+        if len(prior) == 3:
+            quarters[end] = aval - sum(prior)
+    ends = sorted(quarters)
+    out = []
+    for i in range(3, len(ends)):
+        span = (ends[i] - ends[i - 3]).days
+        if 250 <= span <= 290:
+            out.append({"end": ends[i], "ttm_eps": sum(quarters[e] for e in ends[i - 3:i + 1])})
+    return out
+
+
 @cached(ttl=86400)
 def long_history(ticker: str, years: int = 12) -> dict[str, Any]:
     cik = _cik_map().get(ticker.upper().replace("-", "."))
@@ -98,7 +135,9 @@ def long_history(ticker: str, years: int = 12) -> dict[str, Any]:
     try:
         import yfinance as yf
 
-        splits = yf.Ticker(ticker).splits
+        from .us_stock import yfx
+
+        splits = yfx(lambda: yf.Ticker(ticker).splits)
     except Exception:
         splits = None
     all_years = sorted(set().union(*[s.keys() for s in series.values()]))[-years:]
@@ -145,6 +184,15 @@ def long_history(ticker: str, years: int = 12) -> dict[str, Any]:
     except Exception:
         pass
 
+    pe_q = []
+    try:
+        for r in quarterly_ttm_eps(facts, splits)[-44:]:
+            p = px[px.index <= r["end"]]
+            if len(p) and r["ttm_eps"] > 0:
+                pe_q.append([r["end"].strftime("%Y-%m"), num(p.iloc[-1] / r["ttm_eps"], 4)])
+    except Exception:
+        pass
+
     out = {
         "symbol": ticker.upper(),
         "entity": facts.get("entityName"),
@@ -159,7 +207,8 @@ def long_history(ticker: str, years: int = 12) -> dict[str, Any]:
             "fcf_5y_%": pct(cagr("fcf", 5)),
         },
         "historical_pe_by_fy": pe_hist,
-        "note": "EPS 已按拆股调整；历史PE = 财年末价格 / 当财年稀释EPS，为近似值，仅作分位参考",
+        "historical_pe_quarterly_ttm": pe_q,
+        "note": "EPS 已按拆股调整。季度PE = 季末价格 / 滚动4季稀释EPS（[年-月, PE]，财年Q4由年报减前三季推算）；年度PE = 财年末价格 / 当年EPS。价格为复权价，仅作分位参考",
         "source": "SEC EDGAR XBRL",
     }
     return clean(out)

@@ -25,6 +25,7 @@ class TurnResult:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    extra_texts: list[str] = field(default_factory=list)  # 网络搜索引用的原文，用于数字核对
 
 
 def noop(_type: str, _data: dict[str, Any]) -> None:
@@ -47,7 +48,7 @@ def run_tools(calls: list[tuple[str, str, dict[str, Any]]], on_event: EventFn,
         out, err = toolbox.call_tool(name, args)
         ms = int((time.time() - t0) * 1000)
         on_event("tool_result", {"name": name, "ok": not err, "ms": ms, "chars": len(out)})
-        log.append({"name": name, "args": args, "ok": not err, "ms": ms})
+        log.append({"name": name, "args": args, "ok": not err, "ms": ms, "output": out})
         return cid, out, err
 
     if not calls:

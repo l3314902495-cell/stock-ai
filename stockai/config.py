@@ -35,6 +35,10 @@ DEFAULTS: dict[str, Any] = {
     "cache": {"path": "~/.stock-ai/cache.db"},
     "journal": {"path": "~/.stock-ai/journal.db"},
     "reports_dir": "./reports",
+    "analysis": {"critic": False},
+    "alerts": {"auto_from_analysis": True, "interval": 300},
+    "watchlists": {"default": ["NVDA", "AAPL", "MSFT", "TSLA", "SPY", "QQQ", "BTC", "ETH", "SOL"]},
+    "notify": {},
 }
 
 _config: dict[str, Any] | None = None

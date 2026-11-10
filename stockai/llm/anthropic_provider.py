@@ -4,6 +4,7 @@
 - 提示缓存（系统提示 + 工具定义 + 历史对话，多轮工具调用时能省大量输入 token）
 - effort 档位（output_config.effort）
 - 服务端拒答回退（fallbacks="default"，被安全策略拒答时自动换模型重试）
+- 网络搜索（web_search 服务端工具，查最新新闻/公告；按次计费，约 $10/千次）
 中转站可能不支持这些参数：遇到 400 会自动去掉可选参数重试一次，也可在配置里关闭。
 """
 from __future__ import annotations
@@ -30,6 +31,9 @@ class AnthropicConversation(Conversation):
         self.effort = cfg.get("effort", "high")
         sf = cfg.get("server_fallback", "auto")
         self.use_fallback = official if sf == "auto" else bool(sf)
+        ws = cfg.get("web_search", "auto")
+        self.use_web_search = official if ws == "auto" else bool(ws)
+        self.web_search_max_uses = int(cfg.get("web_search_max_uses", 5))
         kwargs: dict[str, Any] = {"max_retries": int(cfg.get("max_retries", 3)), "timeout": float(cfg.get("timeout", 600))}
         key = api_key(cfg)
         if key:
@@ -51,6 +55,7 @@ class AnthropicConversation(Conversation):
             "tools": self.tools,
             "messages": self.messages,
         }
+        web_tool = {"type": "web_search_20260209", "name": "web_search", "max_uses": self.web_search_max_uses}
         optional: dict[str, Any] = {}
         if self.use_cache:
             optional["cache_control"] = {"type": "ephemeral"}
@@ -61,6 +66,8 @@ class AnthropicConversation(Conversation):
 
         def call(with_optional: bool):
             p = {**params, **(optional if with_optional else {})}
+            if with_optional and self.use_web_search:
+                p["tools"] = [*self.tools, web_tool]
             if self.use_fallback and with_optional:
                 return self.client.beta.messages.create(betas=[FALLBACK_BETA], fallbacks="default", **p)
             return self.client.messages.create(**p)
@@ -68,11 +75,11 @@ class AnthropicConversation(Conversation):
         try:
             return call(True)
         except anthropic.BadRequestError as e:
-            if not optional and not self.use_fallback:
+            if not optional and not self.use_fallback and not self.use_web_search:
                 raise
-            warnings.append(f"接口不接受可选参数（{str(e)[:120]}），已去掉 cache/effort/fallback 重试。"
-                            "可在配置中设置 prompt_cache: false, effort: null, server_fallback: false")
-            self.use_cache, self.effort, self.use_fallback = False, None, False
+            warnings.append(f"接口不接受可选参数（{str(e)[:120]}），已去掉 cache/effort/fallback/web_search 重试。"
+                            "可在配置中设置 prompt_cache: false, effort: null, server_fallback: false, web_search: false")
+            self.use_cache, self.effort, self.use_fallback, self.use_web_search = False, None, False, False
             return call(False)
 
     def send(self, text: str, on_event: EventFn = noop) -> TurnResult:
@@ -80,6 +87,7 @@ class AnthropicConversation(Conversation):
         usage: dict[str, int] = {}
         log: list[dict[str, Any]] = []
         warnings: list[str] = []
+        cited: list[str] = []
         resp = None
         for step in range(self.max_steps):
             on_event("status", {"text": f"{self.name} 思考中…（第 {step + 1} 轮）"})
@@ -87,6 +95,10 @@ class AnthropicConversation(Conversation):
             u = resp.usage
             for k in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
                 usage[k] = usage.get(k, 0) + (getattr(u, k, 0) or 0)
+            stu = getattr(u, "server_tool_use", None)
+            if stu is not None:
+                usage["web_search_requests"] = usage.get("web_search_requests", 0) + (getattr(stu, "web_search_requests", 0) or 0)
+            self._server_tool_events(resp.content, on_event, log, cited)
 
             # 原样回传 assistant 内容（含 thinking 块），保证多轮工具调用有效
             self.messages.append({"role": "assistant", "content": resp.content})
@@ -95,7 +107,7 @@ class AnthropicConversation(Conversation):
                 d = getattr(resp, "stop_details", None)
                 why = getattr(d, "explanation", None) if d else None
                 return TurnResult(text=f"模型拒绝回答。{why or ''}", model=resp.model, stop_reason="refusal",
-                                  tool_calls=log, usage=usage, warnings=warnings)
+                                  tool_calls=log, usage=usage, warnings=warnings, extra_texts=cited)
             if resp.stop_reason == "pause_turn":
                 continue
 
@@ -116,9 +128,30 @@ class AnthropicConversation(Conversation):
             if resp.stop_reason == "max_tokens":
                 warnings.append("输出达到 max_tokens 上限被截断，可在配置中调大 max_tokens")
             return TurnResult(text=text, model=resp.model, stop_reason=resp.stop_reason, tool_calls=log,
-                              usage=usage, warnings=warnings)
+                              usage=usage, warnings=warnings, extra_texts=cited)
 
         text = "".join(b.text for b in (resp.content if resp else []) if b.type == "text")
         warnings.append(f"工具调用超过 {self.max_steps} 轮，已停止")
         return TurnResult(text=text, model=self.model, stop_reason="max_steps", tool_calls=log, usage=usage,
-                          warnings=warnings)
+                          warnings=warnings, extra_texts=cited)
+
+    @staticmethod
+    def _server_tool_events(content, on_event: EventFn, log: list, cited: list[str]) -> None:
+        """把服务端工具（网络搜索）的调用显示出来，并收集引用原文供数字核对。"""
+        for b in content:
+            t = getattr(b, "type", "")
+            if t == "server_tool_use":
+                args = getattr(b, "input", {}) or {}
+                on_event("tool_call", {"name": getattr(b, "name", "web_search"), "args": args})
+                log.append({"name": getattr(b, "name", "web_search"), "args": args, "ok": True, "ms": 0, "server": True})
+            elif t == "web_search_tool_result":
+                c = getattr(b, "content", None)
+                ok = isinstance(c, list)
+                on_event("tool_result", {"name": "web_search", "ok": ok, "ms": 0, "chars": len(c) if ok else 0})
+                if ok:
+                    cited.extend(getattr(r, "title", "") or "" for r in c)
+            elif t == "text":
+                for ci in getattr(b, "citations", None) or []:
+                    txt = getattr(ci, "cited_text", None)
+                    if txt:
+                        cited.append(txt)

@@ -63,6 +63,9 @@ def cached(ttl: float) -> Callable:
             if hit is not None:
                 return hit
             val = fn(*args, **kwargs)
+            # 返回 None 或带 _nocache 标记的结果（如临时取不到数据）不缓存，下次重新请求
+            if isinstance(val, dict) and val.pop("_nocache", False):
+                return val
             if val is not None:
                 put(key, val, ttl)
             return val

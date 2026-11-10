@@ -16,7 +16,7 @@ from . import symbols
 from .analytics import technicals as ta
 from .analytics import valuation as val
 from .data import crypto, us_stock
-from .util import clean, num, pct
+from .util import big, clean, num, pct
 
 SECTOR_ETF = {
     "Technology": "XLK", "Healthcare": "XLV", "Financial Services": "XLF", "Consumer Cyclical": "XLY",
@@ -55,7 +55,7 @@ def t_get_technicals(symbol: str, timeframes: list[str] | None = None) -> dict[s
 
     def one(tf: str):
         try:
-            return tf, ta.summarize(ohlcv(s, tf), tf)
+            return tf, ta.summarize(ohlcv(s, tf), tf, asset_type=s["asset_type"])
         except Exception as e:
             return tf, {"error": str(e)[:200]}
 
@@ -112,12 +112,19 @@ def t_get_long_term_financials(symbol: str) -> dict[str, Any]:
     from .data import sec
 
     out = sec.long_history(s["symbol"])
-    hist = [h["pe"] for h in out.get("historical_pe_by_fy", []) if h.get("pe") and h["pe"] > 0]
+    q = [pe for _, pe in out.get("historical_pe_quarterly_ttm", []) if pe and pe > 0]
+    a = [h["pe"] for h in out.get("historical_pe_by_fy", []) if h.get("pe") and h["pe"] > 0]
+    hist, basis = (q, "季度TTM") if len(q) >= 12 else (a, "年度")
     cur = us_stock.info(s["symbol"]).get("trailingPE")
     if hist and cur:
+        srt = sorted(hist)
         out["current_pe_ttm"] = num(cur)
-        out["current_pe_percentile_vs_history"] = num(sum(h <= cur for h in hist) / len(hist), 3)
-        out["historical_pe_median"] = num(sorted(hist)[len(hist) // 2])
+        out["pe_history_stats"] = {
+            "basis": f"{basis}，{len(hist)} 个点",
+            "current_percentile": num(sum(h <= cur for h in hist) / len(hist), 3),
+            "median": num(srt[len(srt) // 2]), "p20": num(srt[int(len(srt) * 0.2)]),
+            "p80": num(srt[min(int(len(srt) * 0.8), len(srt) - 1)]), "min": num(srt[0]), "max": num(srt[-1]),
+        }
     return out
 
 
@@ -208,22 +215,35 @@ def t_get_market_context(asset_type: str = "stock") -> dict[str, Any]:
     return clean(out)
 
 
-def t_run_dcf(symbol: str, scenarios: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def t_run_dcf(symbol: str, scenarios: list[dict[str, Any]] | None = None, subtract_sbc: bool = True) -> dict[str, Any]:
     s = symbols.resolve(symbol)
     if s["asset_type"] != "stock":
         return {"error": "DCF 仅适用于有自由现金流的公司"}
     i = us_stock.info(s["symbol"])
-    fcf = i.get("freeCashflow")
+    cf = us_stock.cash_flow_ttm(s["symbol"])
+    fcf = cf.get("fcf")
     shares = i.get("sharesOutstanding") or i.get("impliedSharesOutstanding")
     net_cash = (i.get("totalCash") or 0) - (i.get("totalDebt") or 0)
     price = i.get("currentPrice") or i.get("regularMarketPrice")
+    sbc = cf.get("sbc")
+    # 股权激励是真实成本（稀释股东），科技公司尤其高；默认从 FCF 中扣除
+    fcf_used = fcf - sbc if (subtract_sbc and fcf and sbc) else fcf
     scenarios = scenarios or [
         {"name": "悲观", "growth_5y": 0.05, "terminal_growth": 0.02, "discount_rate": 0.10},
         {"name": "中性", "growth_5y": 0.10, "terminal_growth": 0.03, "discount_rate": 0.09},
         {"name": "乐观", "growth_5y": 0.18, "terminal_growth": 0.03, "discount_rate": 0.085},
     ]
-    return {"dcf": val.dcf(fcf, shares, net_cash, price, scenarios),
-            "reverse_dcf": val.reverse_dcf(fcf, shares, net_cash, price)}
+    return {
+        "fcf_basis": {
+            "fcf_ttm": big(fcf), "sbc_ttm": big(sbc),
+            "sbc_pct_of_fcf": pct(sbc / fcf) if fcf and sbc and fcf > 0 else None,
+            "fcf_used": big(fcf_used),
+            "basis": "FCF - SBC（股东口径）" if fcf_used != fcf else "FCF（未扣 SBC）",
+            "source": cf.get("source"),
+        },
+        "dcf": val.dcf(fcf_used, shares, net_cash, price, scenarios),
+        "reverse_dcf": val.reverse_dcf(fcf_used, shares, net_cash, price),
+    }
 
 
 def t_trade_plan(symbol: str, entry: float, stop: float, targets: list[float],
@@ -324,7 +344,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "run_dcf",
-        "description": ("仅美股：用 TTM 自由现金流做两阶段 DCF，可传多个情景假设（小数形式，如 0.12 表示 12%）；"
+        "description": ("仅美股：用 TTM 自由现金流（默认扣除股权激励 SBC）做两阶段 DCF，可传多个情景假设（小数形式，如 0.12 表示 12%）；"
                         "同时返回反向DCF——当前股价隐含的未来5年FCF增速。不传 scenarios 则用默认悲观/中性/乐观。"),
         "input_schema": {"type": "object", "properties": {
             "symbol": SYMBOL_PROP,
@@ -333,7 +353,8 @@ TOOLS: list[dict[str, Any]] = [
                 "growth_5y": {"type": "number", "description": "1-5年FCF年增速，小数"},
                 "terminal_growth": {"type": "number", "description": "永续增速，小数，通常 0.02-0.035"},
                 "discount_rate": {"type": "number", "description": "折现率，小数，通常 0.08-0.12"}},
-                "required": ["growth_5y", "terminal_growth", "discount_rate"]}}},
+                "required": ["growth_5y", "terminal_growth", "discount_rate"]}},
+            "subtract_sbc": {"type": "boolean", "description": "是否从 FCF 中扣除股权激励，默认 true（更保守、更真实）"}},
             "required": ["symbol"]},
         "fn": t_run_dcf,
     },

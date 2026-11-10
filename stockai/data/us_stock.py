@@ -1,6 +1,8 @@
 """美股/ETF/指数数据：yfinance（免费，非官方接口——务必缓存）。"""
 from __future__ import annotations
 
+import random
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -21,8 +23,34 @@ def _tk(t: str) -> yf.Ticker:
     return yf.Ticker(t)
 
 
+# ---------------------------------------------------------------- 限流保护
+# Yahoo 对免费接口限流很严：所有网络调用都经过 yfx()，最多 4 个并发，遇到 429/网络抖动指数退避重试。
+# 注意：传给 yfx 的函数内部不要再调用 yfx（避免嵌套占用信号量）。
+_SEM = threading.BoundedSemaphore(4)
+
+
+def _transient(e: Exception) -> bool:
+    name, msg = type(e).__name__.lower(), str(e).lower()
+    return ("ratelimit" in name or "too many requests" in msg or "rate limit" in msg or " 429" in msg
+            or "timed out" in msg or "timeout" in name or "connection" in name
+            or "curl: (28)" in msg or "curl: (35)" in msg or "curl: (56)" in msg)
+
+
+def yfx(fn, retries: int = 4):
+    delay = 2.0
+    for attempt in range(retries + 1):
+        with _SEM:
+            try:
+                return fn()
+            except Exception as e:
+                if not _transient(e) or attempt == retries:
+                    raise
+        time.sleep(delay + random.random())
+        delay *= 2
+
+
 def _history_raw(ticker: str, interval: str, period: str) -> pd.DataFrame:
-    df = _tk(ticker).history(period=period, interval=interval, auto_adjust=True)
+    df = yfx(lambda: _tk(ticker).history(period=period, interval=interval, auto_adjust=True))
     if df is None or df.empty:
         raise ValueError(f"{ticker} 没有 {interval} 行情数据")
     df = df[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
@@ -49,24 +77,38 @@ def history(ticker: str, interval: str = "1d", period: str | None = None) -> pd.
 
 @cached(ttl=60)
 def _fast(ticker: str) -> dict[str, Any]:
-    fi = _tk(ticker).fast_info
-    out = {}
-    for k in ("last_price", "previous_close", "open", "day_high", "day_low", "last_volume",
-              "ten_day_average_volume", "three_month_average_volume", "year_high", "year_low",
-              "market_cap", "fifty_day_average", "two_hundred_day_average", "currency", "exchange"):
-        try:
-            out[k] = fi[k]
-        except Exception:
-            out[k] = None
-    return out
+    def build():
+        fi = _tk(ticker).fast_info
+        out = {"last_price": fi["last_price"]}  # 第一次访问触发请求；限流时在这里抛出并重试
+        for k in ("previous_close", "open", "day_high", "day_low", "last_volume",
+                  "ten_day_average_volume", "three_month_average_volume", "year_high", "year_low",
+                  "market_cap", "fifty_day_average", "two_hundred_day_average", "currency", "exchange"):
+            try:
+                out[k] = fi[k]
+            except Exception:
+                out[k] = None
+        return out
+
+    return yfx(build)
+
+
+class EmptyResponse(RuntimeError):
+    """Yahoo 被限流时 yfinance 常常不报错、而是返回空数据；把这种情况当作限流处理（重试、不缓存）。"""
+
+
+def _info_raw(ticker: str) -> dict[str, Any]:
+    d = _tk(ticker).info or {}
+    if len(d) < 5:
+        raise EmptyResponse("Too Many Requests: Yahoo 返回了空的 info（多半是被限流）")
+    return d
 
 
 @cached(ttl=1800)
 def info(ticker: str) -> dict[str, Any]:
     try:
-        return _tk(ticker).info or {}
+        return yfx(lambda: _info_raw(ticker), retries=2)
     except Exception:
-        return {}
+        return {"_nocache": True}
 
 
 def quote(ticker: str) -> dict[str, Any]:
@@ -167,10 +209,34 @@ def statements(ticker: str) -> dict[str, Any]:
         ("balance_quarterly", "quarterly_balance_sheet", _BS_ROWS, 2),
     ):
         try:
-            data[name] = _series_table(getattr(t, attr), rows, n)
+            data[name] = _series_table(yfx(lambda: getattr(t, attr)), rows, n)
         except Exception:
             data[name] = []
+    if not any(data.values()):  # 全空：多半是限流（ETF/指数本来就没有财报，也没必要缓存）
+        data["_nocache"] = True
     return data
+
+
+def cash_flow_ttm(ticker: str) -> dict[str, Any]:
+    """TTM 现金流：最近 4 季合计（经营现金流 - 资本开支）。
+    注意：yfinance info 里的 freeCashflow 是 Yahoo 的"杠杆自由现金流"，口径不同、偏差很大，不用它。"""
+    st = statements(ticker)
+    q = st.get("cashflow_quarterly") or []
+    out: dict[str, Any] = {}
+    last4 = q[-4:]
+    if len(last4) == 4:
+        for k in ("operating_cf", "capex", "fcf", "sbc"):
+            vals = [r.get(k) for r in last4]
+            out[k] = float(sum(vals)) if all(v is not None for v in vals) else None
+        if out.get("fcf") is None and out.get("operating_cf") is not None and out.get("capex") is not None:
+            out["fcf"] = out["operating_cf"] + out["capex"]  # yfinance 的 capex 为负数
+        out["source"] = f"最近4季财报合计（截至 {last4[-1]['period']}）"
+    if out.get("fcf") is None:
+        a = st.get("cashflow_annual") or []
+        if a:
+            out = {k: a[-1].get(k) for k in ("operating_cf", "capex", "fcf", "sbc")}
+            out["source"] = f"最近年报（{a[-1]['period']}）"
+    return out
 
 
 def _growth(rows: list[dict], key: str, lag: int = 1) -> float | None:
@@ -184,6 +250,8 @@ def fundamentals(ticker: str) -> dict[str, Any]:
     i = info(ticker)
     st = statements(ticker)
     ia, iq = st["income_annual"], st["income_quarterly"]
+    cf = cash_flow_ttm(ticker)
+    fcf = cf.get("fcf")
 
     # 季度同比（第 -1 季 vs 第 -5 季）
     q_yoy_rev = _growth(iq, "revenue", 4) if len(iq) >= 5 else None
@@ -221,7 +289,8 @@ def fundamentals(ticker: str) -> dict[str, Any]:
             "pb": num(i.get("priceToBook")),
             "ev_ebitda": num(i.get("enterpriseToEbitda")),
             "ev_revenue": num(i.get("enterpriseToRevenue")),
-            "fcf_yield_%": pct(i["freeCashflow"] / i["marketCap"]) if i.get("freeCashflow") and i.get("marketCap") else None,
+            "fcf_yield_%": pct(fcf / i["marketCap"]) if fcf and i.get("marketCap") else None,
+            "fcf_minus_sbc_yield_%": pct((fcf - cf["sbc"]) / i["marketCap"]) if fcf and cf.get("sbc") and i.get("marketCap") else None,
             "dividend_yield_%": num(i.get("dividendYield")),
         },
         "profitability": {
@@ -244,8 +313,11 @@ def fundamentals(ticker: str) -> dict[str, Any]:
             "net_cash": big((i.get("totalCash") or 0) - (i.get("totalDebt") or 0)) if i.get("totalCash") is not None else None,
             "debt_to_equity": num(i.get("debtToEquity")),
             "current_ratio": num(i.get("currentRatio")),
-            "free_cash_flow_ttm": big(i.get("freeCashflow")),
-            "operating_cash_flow_ttm": big(i.get("operatingCashflow")),
+            "free_cash_flow_ttm": big(fcf),
+            "operating_cash_flow_ttm": big(cf.get("operating_cf")),
+            "sbc_ttm": big(cf.get("sbc")),
+            "sbc_pct_of_fcf": pct(cf["sbc"] / fcf) if fcf and fcf > 0 and cf.get("sbc") else None,
+            "cash_flow_source": cf.get("source"),
         },
         "shares": {
             "shares_outstanding": big(i.get("sharesOutstanding")),
@@ -337,9 +409,13 @@ def quality_scores(ticker: str) -> dict[str, Any]:
 @cached(ttl=900)
 def options_summary(ticker: str) -> dict[str, Any]:
     t = _tk(ticker)
-    exps = list(t.options or [])
+    exps = yfx(lambda: list(t.options or []))
+    if not exps:  # Yahoo 偶尔临时返回空列表，换一个新的 Ticker 对象再试一次
+        time.sleep(1)
+        t = _tk(ticker)
+        exps = yfx(lambda: list(t.options or []))
     if not exps:
-        return {"symbol": ticker, "note": "该标的没有期权数据"}
+        return {"symbol": ticker, "note": "暂时没有取到期权数据（该标的可能没有期权，或接口临时异常）", "_nocache": True}
     price = _fast(ticker).get("last_price")
     today = datetime.now().date()
     out = {"symbol": ticker.upper(), "price": num(price), "expirations": []}
@@ -353,7 +429,7 @@ def options_summary(ticker: str) -> dict[str, Any]:
             break
     for e, dte in picks:
         try:
-            ch = t.option_chain(e)
+            ch = yfx(lambda: t.option_chain(e))
         except Exception:
             continue
         calls, puts = ch.calls, ch.puts
@@ -398,7 +474,7 @@ def options_summary(ticker: str) -> dict[str, Any]:
 # ---------------------------------------------------------------- 新闻与事件
 @cached(ttl=900)
 def news(ticker: str, limit: int = 10) -> list[dict[str, Any]]:
-    items = _tk(ticker).news or []
+    items = yfx(lambda: _tk(ticker).news) or []
     out = []
     for it in items[:limit]:
         c = it.get("content", it)
@@ -416,7 +492,7 @@ def events(ticker: str) -> dict[str, Any]:
     t = _tk(ticker)
     out: dict[str, Any] = {"symbol": ticker.upper()}
     try:
-        cal = t.calendar or {}
+        cal = yfx(lambda: t.calendar) or {}
         ed = cal.get("Earnings Date")
         out["next_earnings"] = [str(d) for d in ed] if isinstance(ed, list) else (str(ed) if ed else None)
         if out["next_earnings"]:
@@ -428,7 +504,7 @@ def events(ticker: str) -> dict[str, Any]:
     except Exception:
         pass
     try:
-        eh = t.earnings_dates
+        eh = yfx(lambda: t.earnings_dates)
         if eh is not None and not eh.empty:
             past = eh.dropna(subset=["Reported EPS"]).head(4)
             out["recent_earnings_surprises"] = [
@@ -439,7 +515,7 @@ def events(ticker: str) -> dict[str, Any]:
     except Exception:
         pass
     try:
-        ud = t.upgrades_downgrades
+        ud = yfx(lambda: t.upgrades_downgrades)
         if ud is not None and not ud.empty:
             ud = ud.sort_index(ascending=False).head(8)
             out["analyst_actions"] = [
@@ -451,7 +527,7 @@ def events(ticker: str) -> dict[str, Any]:
     except Exception:
         pass
     try:
-        ins = t.insider_transactions
+        ins = yfx(lambda: t.insider_transactions)
         if ins is not None and not ins.empty:
             ins = ins.copy()
             ins["Start Date"] = pd.to_datetime(ins["Start Date"])
@@ -471,7 +547,7 @@ def events(ticker: str) -> dict[str, Any]:
     except Exception:
         pass
     try:
-        ih = t.institutional_holders
+        ih = yfx(lambda: t.institutional_holders)
         if ih is not None and not ih.empty:
             out["top_institutions"] = [
                 {"holder": r.get("Holder"), "pct_held": pct(r.get("pctHeld")), "pct_change": pct(r.get("pctChange"))}
@@ -490,8 +566,7 @@ def peers(ticker: str) -> list[str]:
     if not industry_key:
         return []
     try:
-        ind = yf.Industry(industry_key)
-        top = ind.top_companies
+        top = yfx(lambda: yf.Industry(industry_key).top_companies)
         if top is None or top.empty:
             return []
         syms = [s for s in top.index.tolist() if s.upper() != ticker.upper()]

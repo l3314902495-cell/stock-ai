@@ -132,8 +132,38 @@ def _cross_info(fast: pd.Series, slow: pd.Series, name: str) -> str | None:
     return f"{name}: {bars_ago} 根K线前出现{kind}"
 
 
+# ---------------------------------------------------------------- K 线是否收盘
+_DUR = {"15m": pd.Timedelta(minutes=15), "30m": pd.Timedelta(minutes=30), "1h": pd.Timedelta(hours=1),
+        "4h": pd.Timedelta(hours=4), "1d": pd.Timedelta(days=1), "1wk": pd.Timedelta(days=7)}
+
+
+def last_bar_status(df: pd.DataFrame, interval: str, asset_type: str = "crypto",
+                    now: pd.Timestamp | None = None) -> dict[str, Any]:
+    """判断最后一根 K 线是否已经走完。美股按美东 16:00 收盘计算，加密按 UTC 自然周期。"""
+    start = df.index[-1]
+    if start.tz is None:
+        start = start.tz_localize("UTC")
+    now = now if now is not None else pd.Timestamp.now(tz="UTC")
+    dur = _DUR.get(interval, pd.Timedelta(days=1))
+    if asset_type == "stock":
+        st = start.tz_convert("America/New_York")
+        close = st.normalize() + pd.Timedelta(hours=16)
+        open_ = st.normalize() + pd.Timedelta(hours=9, minutes=30)
+        if interval == "1d":
+            end, start = close, max(st, open_)
+        elif interval == "1wk":
+            end, start = st.normalize() + pd.Timedelta(days=4 - st.weekday(), hours=16), max(st, open_)
+        else:
+            end, start = min(st + dur, close), st
+    else:
+        end = start + dur
+    complete = bool(now >= end)
+    progress = 1.0 if complete else max(0.0, min(1.0, (now - start) / (end - start)))
+    return {"complete": complete, "progress": progress}
+
+
 # ---------------------------------------------------------------- 汇总
-def summarize(df: pd.DataFrame, interval: str, recent_bars: int = 8) -> dict[str, Any]:
+def summarize(df: pd.DataFrame, interval: str, recent_bars: int = 8, asset_type: str = "crypto") -> dict[str, Any]:
     """单周期技术面摘要。"""
     c = df["Close"]
     if len(c) < 30:
@@ -210,12 +240,22 @@ def summarize(df: pd.DataFrame, interval: str, recent_bars: int = 8) -> dict[str
         "volume_profile": volume_profile(lookback),
         "range_high": num(lookback["High"].max()),
         "range_low": num(lookback["Low"].min()),
+        "last_bar_complete": True,
         "recent_bars": [
             {"t": idx, "o": num(r_["Open"]), "h": num(r_["High"]), "l": num(r_["Low"]), "c": num(r_["Close"]),
              "v": num(r_["Volume"], 3)}
             for idx, r_ in df.iloc[-recent_bars:].iterrows()
         ],
     }
+    status = last_bar_status(df, interval, asset_type)
+    if not status["complete"]:
+        p = status["progress"]
+        out["last_bar_complete"] = False
+        out["last_bar_progress_%"] = round(p * 100, 1)
+        out["rsi14_last_closed_bar"] = num(r.iloc[-2], 3)
+        if vol20.iloc[-2] and p > 0.05:
+            out["volume_vs_20avg_projected"] = num(df["Volume"].iloc[-1] / p / vol20.iloc[-2])
+        out["note"] = "最后一根K线尚未收盘：价格/指标含盘中数据，量比请看 projected 预估值"
     return clean(out)
 
 

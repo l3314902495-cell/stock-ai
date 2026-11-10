@@ -11,7 +11,9 @@ llm:
       api_key_env: ANTHROPIC_API_KEY
       effort: high           # low / medium / high / xhigh / max，越高越深入、越贵
       max_tokens: 16000
-      # 官方 API 默认开启：提示缓存、服务端拒答回退（server_fallback）
+      # 官方 API 默认开启：提示缓存、服务端拒答回退（server_fallback）、网络搜索（web_search）
+      # web_search: true       # 查最新新闻/公告，约 $10/千次搜索；不想要设为 false
+      # web_search_max_uses: 5 # 单次分析最多搜索几次
 
     # ---- Anthropic 格式的中转站 ----
     claude_relay:
@@ -24,6 +26,9 @@ llm:
       # prompt_cache: false
       # effort: null
       # server_fallback: false
+      # web_search: true       # 中转站默认不开网络搜索，确认支持后可打开
+      # 中转站价格各不相同，配置后才会显示成本（单位：每百万 token）
+      # price: {input: 4, output: 20, cache_read: 0.2, cache_write: 5, currency: USD}
 
     # ---- OpenAI 兼容格式（需要模型支持 function calling）----
     # 下面的模型名只是示例，请以各服务商当前文档为准
@@ -32,6 +37,7 @@ llm:
       base_url: https://api.deepseek.com
       model: deepseek-chat
       api_key_env: DEEPSEEK_API_KEY
+      # price: {input: 2, output: 8, currency: CNY}   # 按服务商当前价格填写
 
     qwen:
       type: openai
@@ -66,6 +72,28 @@ data:
   crypto_exchange: okx     # ccxt 交易所 id：okx / bybit / kraken / binance（部分地区受限）
   # SEC 要求 User-Agent 带联系方式，请改成你自己的（名字 + 邮箱）
   sec_user_agent: "stock-ai personal-research your-email@example.com"
+
+analysis:
+  critic: false            # true = 每次分析后追加一轮"审稿"（挑错 + 修订版），成本约 +30%；也可用 --critic 单次开启
+
+# 自选列表：stockai scan / 网页"扫描"使用
+watchlists:
+  default: [NVDA, AAPL, MSFT, TSLA, SPY, QQQ, BTC, ETH, SOL]
+  # ai: [NVDA, AMD, AVGO, TSM, MU, PLTR]
+  # crypto: [BTC, ETH, SOL, BNB, DOGE, SUI, HYPE]
+
+# 价位提醒：AI 结论的入场区/止损/目标会自动生成提醒
+alerts:
+  auto_from_analysis: true
+  interval: 300            # 后台检查间隔（秒）
+
+# 推送渠道（可同时配置多个，密钥写在 .env）。测试：stockai alerts test-notify
+notify: {}                 # 启用时删掉 {}，并取消下面对应行的注释
+#  telegram:   {bot_token_env: TG_BOT_TOKEN, chat_id_env: TG_CHAT_ID}
+#  serverchan: {key_env: SERVERCHAN_KEY}                  # 微信推送 https://sct.ftqq.com
+#  bark:       {key_env: BARK_KEY, server: https://api.day.app}   # iOS
+#  ntfy:       {topic_env: NTFY_TOPIC, server: https://ntfy.sh}
+#  webhook:    {url_env: NOTIFY_WEBHOOK_URL}              # POST JSON {"title","body","text"}
 
 cache:
   path: ~/.stock-ai/cache.db
