@@ -7,7 +7,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from .config import expand, get_config
@@ -20,6 +20,9 @@ def _db() -> sqlite3.Connection:
     conn.execute("""CREATE TABLE IF NOT EXISTS alerts (
         id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, asset_type TEXT, cond TEXT, price REAL, note TEXT,
         source TEXT, created_at TEXT, active INTEGER DEFAULT 1, triggered_at TEXT, triggered_price REAL)""")
+    if "last_checked_at" not in {r[1] for r in conn.execute("PRAGMA table_info(alerts)")}:
+        conn.execute("ALTER TABLE alerts ADD COLUMN last_checked_at TEXT")
+        conn.commit()
     return conn
 
 
@@ -44,7 +47,7 @@ def remove(id_: int) -> None:
 
 def list_alerts(active_only: bool = False) -> list[dict[str, Any]]:
     cols = ["id", "symbol", "asset_type", "cond", "price", "note", "source", "created_at", "active", "triggered_at",
-            "triggered_price"]
+            "triggered_price", "last_checked_at"]
     q = f"SELECT {', '.join(cols)} FROM alerts" + (" WHERE active=1" if active_only else "") + " ORDER BY id DESC"
     with _lock:
         return [dict(zip(cols, r)) for r in _db().execute(q).fetchall()]
@@ -80,42 +83,75 @@ def from_analysis(journal_id: int, symbol: str, asset_type: str, summary: dict[s
     return ids
 
 
-def _price(symbol: str, asset_type: str) -> float | None:
-    from . import tools
+def _market(symbol: str, asset_type: str) -> tuple[float | None, "pd.DataFrame | None"]:
+    """现价 + 最近的 15 分钟 K 线（用来发现两次检查之间的插针）。"""
+    from . import symbols
+    from .tools import ohlcv
 
-    import json
+    try:
+        sym = symbols.resolve(symbol if asset_type == "crypto" else f"stock:{symbol}")
+        df = ohlcv(sym, "15m")
+        idx = df.index.tz_convert("UTC") if df.index.tz is not None else df.index.tz_localize("UTC")
+        df = df.set_axis(idx)
+        return float(df["Close"].iloc[-1]), df
+    except Exception:
+        return None, None
 
-    out, err = tools.call_tool("get_quote", {"symbol": symbol if asset_type == "crypto" else f"stock:{symbol}"})
-    if err:
-        return None
-    return json.loads(out).get("quote", {}).get("price")
+
+def _window_extremes(df, since: str | None, price: float) -> tuple[float, float]:
+    """since 之后（含当前价）的最高价和最低价。只用开始时间不早于 since 的 K 线，避免把提醒创建前的价格算进来。"""
+    import pandas as pd
+
+    hi = lo = price
+    if df is not None and since:
+        t = pd.Timestamp(since)
+        t = t.tz_localize("UTC") if t.tz is None else t.tz_convert("UTC")
+        win = df[df.index >= t]
+        if len(win):
+            hi, lo = max(hi, float(win["High"].max())), min(lo, float(win["Low"].min()))
+    return hi, lo
 
 
 def check_once(on_trigger: Callable[[dict, float], None] | None = None) -> list[dict[str, Any]]:
     from . import notify
 
     fired = []
+    now = datetime.now(timezone.utc)
     active = list_alerts(active_only=True)
-    prices: dict[tuple[str, str], float | None] = {}
+    market: dict[tuple[str, str], tuple] = {}
     for a in active:
         key = (a["symbol"], a["asset_type"])
-        if key not in prices:
-            prices[key] = _price(*key)
-        p = prices[key]
+        if key not in market:
+            market[key] = _market(*key)
+        p, df = market[key]
         if p is None:
             continue
-        if (a["cond"] == "above" and p >= a["price"]) or (a["cond"] == "below" and p <= a["price"]):
-            with _lock:
-                conn = _db()
-                conn.execute("UPDATE alerts SET active=0, triggered_at=?, triggered_price=? WHERE id=?",
-                             (datetime.now(timezone.utc).isoformat(timespec="seconds"), p, a["id"]))
-                conn.commit()
-            title = f"{a['symbol']} {'≥' if a['cond'] == 'above' else '≤'} {a['price']}"
-            body = f"现价 {p}。{a['note'] or ''}（{a['source']}）"
-            a.update(triggered_price=p, notify=notify.send(title, body))
-            fired.append(a)
-            if on_trigger:
-                on_trigger(a, p)
+        # 窗口：上次检查时间（回退 15 分钟，覆盖当时还没收盘的那根 K 线）或创建时间
+        since = a.get("last_checked_at")
+        if since:
+            since = (datetime.fromisoformat(since) - timedelta(minutes=15)).isoformat()
+        else:
+            since = a["created_at"]
+        hi, lo = _window_extremes(df, since, p)
+        hit = (a["cond"] == "above" and hi >= a["price"]) or (a["cond"] == "below" and lo <= a["price"])
+        with _lock:
+            conn = _db()
+            if hit:
+                conn.execute("UPDATE alerts SET active=0, triggered_at=?, triggered_price=?, last_checked_at=? WHERE id=?",
+                             (now.isoformat(timespec="seconds"), p, now.isoformat(timespec="seconds"), a["id"]))
+            else:
+                conn.execute("UPDATE alerts SET last_checked_at=? WHERE id=?", (now.isoformat(timespec="seconds"), a["id"]))
+            conn.commit()
+        if not hit:
+            continue
+        wick = (a["cond"] == "above" and p < a["price"]) or (a["cond"] == "below" and p > a["price"])
+        title = f"{a['symbol']} {'≥' if a['cond'] == 'above' else '≤'} {a['price']}"
+        body = (f"现价 {p}" + (f"（期间曾触及 {hi if a['cond'] == 'above' else lo}，已回到价位另一侧）" if wick else "")
+                + f"。{a['note'] or ''}（{a['source']}）")
+        a.update(triggered_price=p, wick=wick, notify=notify.send(title, body))
+        fired.append(a)
+        if on_trigger:
+            on_trigger(a, p)
     return fired
 
 

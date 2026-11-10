@@ -170,32 +170,98 @@ def evaluate_plan(st: dict[str, Any], bars: pd.DataFrame, price_then: float | No
     return res
 
 
-def evaluate(entry: dict[str, Any]) -> dict[str, Any]:
+_FINAL = ("止损", "到达目标2", "到期平仓", "未触发入场（已过期）", "同一根K线触及止损和目标（无法判断）")
+_STEP = {"1h": pd.Timedelta(hours=1), "4h": pd.Timedelta(hours=4), "1d": pd.Timedelta(days=1)}
+
+
+def _is_final(plan: dict[str, Any], st: dict[str, Any], created: pd.Timestamp) -> bool:
+    out = plan.get("outcome")
+    if out in _FINAL:
+        return True
+    if out == "到达目标1":  # 只有一个目标，或已过持仓期限，目标2 不会再算了
+        days = plan.get("horizon_days")
+        return len(st.get("targets") or []) < 2 or (days is not None and pd.Timestamp.now(tz="UTC") > created + pd.Timedelta(days=days))
+    return False
+
+
+def bars_since(sym: dict[str, Any], created: pd.Timestamp) -> tuple[pd.DataFrame, str]:
+    """取覆盖"分析时间至今"的 K 线：越久远的分析用越粗的周期，保证不缺数据。"""
+    from .data import crypto, us_stock
+
+    age_h = (pd.Timestamp.now(tz="UTC") - created).total_seconds() / 3600 + 24
+    if sym["asset_type"] == "crypto":
+        if age_h <= 4800:
+            iv, n = "1h", age_h
+        elif age_h <= 4 * 3000:
+            iv, n = "4h", age_h / 4
+        else:
+            iv, n = "1d", age_h / 24
+        limit = int(-(-n // 240) * 240)  # 向上取整到 240 的倍数，便于命中缓存
+        df = crypto.history(sym["symbol"], iv, min(limit, 5040))
+    else:
+        iv = "1h" if age_h <= 700 * 24 else "1d"
+        df = us_stock.history(sym["symbol"], iv, "730d" if iv == "1h" else "max")
+    idx = df.index.tz_convert("UTC") if df.index.tz is not None else df.index.tz_localize("UTC")
+    return df.set_axis(idx), iv
+
+
+def _plan_cache_get(id_: int) -> dict[str, Any] | None:
+    with _lock:
+        conn = _db()
+        conn.execute("CREATE TABLE IF NOT EXISTS plan_results (analysis_id INTEGER PRIMARY KEY, result_json TEXT)")
+        r = conn.execute("SELECT result_json FROM plan_results WHERE analysis_id=?", (id_,)).fetchone()
+    return json.loads(r[0]) if r else None
+
+
+def _plan_cache_put(id_: int, plan: dict[str, Any]) -> None:
+    with _lock:
+        conn = _db()
+        conn.execute("CREATE TABLE IF NOT EXISTS plan_results (analysis_id INTEGER PRIMARY KEY, result_json TEXT)")
+        conn.execute("INSERT OR REPLACE INTO plan_results VALUES (?, ?)", (id_, json.dumps(plan, ensure_ascii=False)))
+        conn.commit()
+
+
+def evaluate(entry: dict[str, Any], prices: dict[tuple, float] | None = None) -> dict[str, Any]:
+    """评估一条历史分析。已结束的短线计划结果会缓存，之后只需取一次现价。prices 用于批量评估时共享现价。"""
     from . import symbols
     from .tools import ohlcv
 
     created = pd.Timestamp(entry["created_at"])
     if created.tz is None:
         created = created.tz_localize("UTC")
+    key = (entry["symbol"], entry["asset_type"])
     sym = symbols.resolve(entry["symbol"] if entry["asset_type"] == "crypto" else f"stock:{entry['symbol']}")
-    df = ohlcv(sym, "1h")
-    idx = df.index.tz_convert("UTC") if df.index.tz is not None else df.index.tz_localize("UTC")
-    df = df.set_axis(idx)
-    after = df[df.index > created]
+    st = (entry.get("summary") or {}).get("short_term") or {}
     price_then = entry.get("price")
-    now_price = float(df["Close"].iloc[-1])
-    res: dict[str, Any] = {"now": num(now_price),
-                           "days": round((pd.Timestamp.now(tz="UTC") - created).total_seconds() / 86400, 1)}
+    plan = _plan_cache_get(entry["id"]) if entry.get("id") is not None and st else None
+    res: dict[str, Any] = {"days": round((pd.Timestamp.now(tz="UTC") - created).total_seconds() / 86400, 1)}
+
+    if st and plan is None:
+        df, iv = bars_since(sym, created)
+        after = df[df.index > created]
+        if len(df) and df.index[0] > created + _STEP.get(iv, pd.Timedelta(hours=1)):
+            res["note"] = f"K线只覆盖到 {df.index[0]:%Y-%m-%d}，早于此的走势缺失，结果可能不准"
+        plan = evaluate_plan(st, after, price_then, created)
+        plan["bar_interval"] = iv
+        if entry.get("id") is not None and _is_final(plan, st, created) and "note" not in res:
+            _plan_cache_put(entry["id"], plan)
+        if prices is not None and len(df):
+            prices.setdefault(key, float(df["Close"].iloc[-1]))
+        if not len(after):
+            res.setdefault("note", "分析之后还没有新的K线")
+
+    now_price = prices.get(key) if prices is not None else None
+    if now_price is None:
+        now_price = float(ohlcv(sym, "1d")["Close"].iloc[-1])
+        if prices is not None:
+            prices[key] = now_price
+    res["now"] = num(now_price)
     if price_then:
         res["return_%"] = pct(now_price / price_then - 1)
-    st = (entry.get("summary") or {}).get("short_term") or {}
     if st:
-        plan = evaluate_plan(st, after, price_then, created)
         res["short_outcome"] = plan.get("outcome")
         res["short_r"] = plan.get("r_multiple")
         res["plan"] = plan
-    if not len(after):
-        res["note"] = "分析之后还没有新的K线"
     return res
 
 
@@ -205,9 +271,10 @@ def stats(limit: int = 500) -> dict[str, Any]:
     groups: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
     long_by_rating: dict[str, list] = defaultdict(list)
     errors = 0
+    prices: dict[tuple, float] = {}  # 同一标的只取一次现价
     for r in rows:
         try:
-            ev = evaluate(r)
+            ev = evaluate(r, prices)
         except Exception:
             errors += 1
             continue
@@ -222,6 +289,8 @@ def stats(limit: int = 500) -> dict[str, Any]:
                 g["plans"].append(out)
                 if ev.get("short_r") is not None and out not in ("持仓中",):
                     g["r"].append(ev["short_r"])
+                    if out in ("止损", "到达目标1", "到达目标2", "到期平仓"):
+                        g["closed_r"].append(ev["short_r"])
         lt = (r.get("summary") or {}).get("long_term") or {}
         if lt.get("rating") and ev.get("return_%") is not None:
             long_by_rating[lt["rating"]].append(ev["return_%"])
@@ -229,14 +298,14 @@ def stats(limit: int = 500) -> dict[str, Any]:
     def summarize(g):
         plans = g["plans"]
         closed = [p for p in plans if p in ("止损", "到达目标1", "到达目标2", "到期平仓")]
-        wins = [p for p in closed if p.startswith("到达")]
+        wins = [r for r in g["closed_r"] if r > 0]  # 到期平仓但赚钱也算胜
         return {
             "分析数": len(g["n"]),
             "交易计划数": len(plans),
             "已入场": len([p for p in plans if not p.startswith(("等待", "未触发"))]),
             "未触发入场": len([p for p in plans if p.startswith("未触发")]),
             "已结束": len(closed),
-            "胜率_%": round(len(wins) / len(closed) * 100, 1) if closed else None,
+            "胜率_%": round(len(wins) / len(g["closed_r"]) * 100, 1) if g["closed_r"] else None,
             "平均R": round(sum(g["r"]) / len(g["r"]), 2) if g["r"] else None,
             "至今平均涨跌_%": round(sum(g["ret"]) / len(g["ret"]), 2) if g["ret"] else None,
         }
@@ -246,5 +315,5 @@ def stats(limit: int = 500) -> dict[str, Any]:
         "long_term_by_rating": {k: {"数量": len(v), "至今平均涨跌_%": round(sum(v) / len(v), 2)}
                                 for k, v in long_by_rating.items()},
         "evaluate_errors": errors,
-        "note": "胜率只统计已结束（止损/到目标/到期）的计划；平均R：止损记-1，到目标记实际R倍数，到期按收盘价计算",
+        "note": "胜率 = 已结束（止损/到目标/到期）计划中 R>0 的比例；样本少于 30 笔时参考价值有限；平均R：止损记-1，到目标记实际R倍数，到期按收盘价计算",
     }

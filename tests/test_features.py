@@ -55,7 +55,7 @@ def test_alerts_from_analysis_and_trigger(cfg, monkeypatch):
     assert any(k.startswith("进入短线入场区") and v == ("below", 97) for k, v in rows.items())
     assert any(k.startswith("跌到长线合理价值区间下沿") and v == ("below", 80) for k, v in rows.items())
 
-    monkeypatch.setattr(alerts, "_price", lambda s, a: 96.5)  # 进入入场区，但没到止损
+    monkeypatch.setattr(alerts, "_market", lambda s, a: (96.5, None))  # 进入入场区，但没到止损
     fired = alerts.check_once()
     assert [f["note"][:7] for f in fired] == ["进入短线入场区"]
     assert fired[0]["notify"] == ["webhook: 已发送"]
@@ -91,3 +91,24 @@ def test_scanner_breakout(cfg, monkeypatch):
     assert "突破20日高点" in sig and any(s.startswith("放量") for s in sig) and "接近一年新高" in sig
     assert "3天后财报" in sig
     assert rows[0]["direction"] > 0
+
+
+def test_alert_catches_wick_between_checks(cfg, monkeypatch):
+    """两次检查之间价格插到止损又弹回，也要触发；提醒创建之前的价格不算。"""
+    from datetime import datetime, timedelta, timezone
+
+    from stockai import alerts
+
+    i = alerts.add("WICK", "crypto", "below", 90, "止损")
+    created = datetime.fromisoformat(alerts.list_alerts()[0]["created_at"])
+    idx = pd.DatetimeIndex([created - timedelta(minutes=30), created + timedelta(minutes=15),
+                            created + timedelta(minutes=30)])
+    pre = pd.DataFrame({"High": [101, 101, 101], "Low": [80, 99, 98], "Close": [100, 100, 100]}, index=idx)
+    monkeypatch.setattr(alerts, "_market", lambda s, a: (100.0, pre))
+    assert alerts.check_once() == []  # 80 发生在创建之前，不触发
+
+    wick = pre.copy()
+    wick.loc[created + timedelta(minutes=45)] = [100, 88.5, 99]  # 插针到 88.5 后收回 99
+    monkeypatch.setattr(alerts, "_market", lambda s, a: (99.0, wick.sort_index()))
+    fired = alerts.check_once()
+    assert [f["id"] for f in fired] == [i] and fired[0]["wick"] is True
