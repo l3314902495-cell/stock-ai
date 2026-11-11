@@ -2,7 +2,7 @@
 
 AI 美股/加密货币分析工具（个人研究用）。用户偏好中文交流。代码说明见 README.md。
 
-常用命令：`pip install -e ".[dev]"`、`pytest -q`（全部离线，约 10 秒）、`stockai bt list|eval|board`。
+常用命令：`pip install -e ".[dev]"`、`python -m pytest -q`（全部离线，约 10 秒）、`stockai bt list|eval|board`。
 
 ## 持续优化协议（定时会话必须遵守）
 
@@ -15,7 +15,7 @@ AI 美股/加密货币分析工具（个人研究用）。用户偏好中文交�
 4. **选一个假设**：取 BACKLOG 最上面未完成的一条（或基于最近实验结果提出有依据的新假设）。动手前先写清楚假设和依据。
 5. **实现**：在 `stockai/strategies/` 新增策略（新名字，不修改已有策略，基线和冠军保持不变以便对照）。同一假设最多 3 个变体。
    需要其他标的（如 BTC 过滤、SPY 过滤）时用 `strategies.reference(df, "BTC-USD")`，不要直接读文件或联网取数。
-6. **验证**：`pytest -q` 必须全部通过（包括因果性检查）。然后运行
+6. **验证**：`python -m pytest -q` 必须全部通过（不要直接用 `pytest`，可能用到别的 Python 环境）（包括因果性检查）。然后运行
    `stockai bt eval <新策略> [-g 组] --record "<假设>" --change "<改动>" --conclusion "<结论>"`；
    判定为可采纳时加 `--crown`。**每次评测都必须 --record**，包括失败的变体。
 7. **更新 BACKLOG**：把完成的条目移到"已完成"，注明实验编号和结论；根据结果补充新假设。
