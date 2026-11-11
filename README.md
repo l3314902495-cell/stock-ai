@@ -137,6 +137,20 @@ stockai web --alerts      # 同时在后台运行价位提醒监控
 - AI 分析：实时显示调用了哪些工具；报告里**未核实的数字黄色高亮**；审稿意见；成本；一键查看工具原始数据
 - 对话追问、历史记录（点击评估至今表现）、自选股扫描（一键 AI 分析）、提醒管理、胜率统计
 
+### 策略回测与持续优化
+
+```bash
+stockai bt list                         # 已注册的规则策略
+stockai bt eval                         # 滚动前推评测全部策略（样本外 2008–2024 / 2018–2024）
+stockai bt eval sma_trend -g stocks -v  # 单个策略，显示每年选择的参数和各资产表现
+stockai bt board                        # 各资产组当前冠军
+```
+
+- 用仓库内冻结的日线快照（`backtest_data/`）评测，结果可复现；2025 年之后的数据作为验证集锁定
+- 次日开盘成交、计入手续费和滑点、空仓现金计息、自动检查策略是否偷看未来
+- 目标与规则见 **GOALS.md**；每次实验记录在 `optimize/EXPERIMENTS.md`，待验证假设在 `optimize/BACKLOG.md`
+- 每周定时会话按 `CLAUDE.md` 里的协议做一个实验，结果以 PR 提交，由你审核合并
+
 ### 标的输入规则
 
 | 输入 | 解析为 |
@@ -197,6 +211,8 @@ stockai/
 ├── scanner.py          自选股扫描（纯代码）
 ├── alerts.py notify.py 价位提醒与推送
 ├── journal.py          分析日志、计划回放、胜率统计
+├── strategies/         可回测的规则策略（持续优化在这里新增策略）
+├── backtest/           回测引擎、滚动前推评测、护栏与记分牌（评测器，优化会话不得修改）
 ├── llm/                AI 提供方：anthropic_provider.py / openai_provider.py
 ├── data/               数据源：us_stock.py(yfinance) sec.py crypto.py(ccxt/CoinGecko/DefiLlama)
 ├── analytics/          纯计算：technicals.py（指标/结构/未收盘判断）valuation.py（DCF/交易计划）

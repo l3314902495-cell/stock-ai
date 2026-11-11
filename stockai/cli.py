@@ -270,6 +270,57 @@ def cmd_alerts(a):
             console.print(r)
 
 
+def cmd_bt(a):
+    from . import strategies
+    from .backtest import evaluate as ev
+    from .backtest import report
+
+    if a.action == "list":
+        t = Table("策略", "资产组", "参数候选", "说明")
+        for name, st in strategies.REGISTRY.items():
+            grids = "；".join(f"{g}: {st.group_grid.get(g, st.grid) or '无'}" for g in st.groups)
+            t.add_row(name, ",".join(st.groups), grids, st.description)
+        console.print(t)
+        return
+    if a.action == "board":
+        sb = ev.load_scoreboard()
+        console.print(f"累计实验：{sb.get('experiments', 0)} 次")
+        for g, c in (sb.get("groups") or {}).items():
+            console.print(f"[bold]{g}[/bold] 冠军：{c['strategy']} 分数 {c['score']:.3f}（{c['crowned_at']}）{c.get('note', '')}")
+        if not sb.get("groups"):
+            console.print("还没有任何策略通过护栏成为冠军")
+        return
+    names = a.strategies or [n for n in strategies.REGISTRY if n != "buy_hold"]
+    groups = [a.group] if a.group else ["stocks", "crypto"]
+    results = []
+    for g in groups:
+        for n in names:
+            if g not in strategies.get(n).groups:
+                continue
+            with console.status(f"评测 {n} @ {g}{'（验证集）' if a.action == 'holdout' else ''}…"):
+                r = ev.evaluate(n, g, holdout=(a.action == "holdout"))
+            results.append(r)
+            j = ev.judge(r)
+            color = "green" if r["passes"] else "red"
+            console.print(f"[{color}]{report.summary_line(r)}[/{color}]")
+            if a.action == "eval":
+                console.print(f"  判定：{'✅ 可采纳' if j['accept'] else '❌ 不采纳'}（{j['reason']}）")
+            if r.get("causality_detail"):
+                console.print(f"  [red]{r['causality_detail']}[/red]")
+            if a.verbose:
+                console.print("  每年参数：" + "；".join(f"{c['year']}:{c['params']}" for c in r["chosen_params"]))
+                for s_, pa in r["per_asset"].items():
+                    console.print(f"    {s_:9s} 年化 {report.pct(pa['cagr'])} 回撤 {report.pct(pa['max_dd'])} 交易 {pa['trades']}")
+    if a.action == "eval" and a.record:
+        n = report.record(results, a.record, a.change or "", a.conclusion or "")
+        console.print(f"已记录为实验 #{n}（optimize/EXPERIMENTS.md）")
+    if a.action == "eval" and a.crown:
+        for r in results:
+            if ev.judge(r)["accept"]:
+                ev.crown(r, a.change or a.record or "")
+                console.print(f"[bold green]{r['strategy']} 成为 {r['group']} 新冠军[/bold green]")
+
+
 def cmd_show(a):
     from . import journal
 
@@ -376,6 +427,17 @@ def main(argv=None):
     s = sub.add_parser("stats", help="按模型/模式统计历史判断表现")
     s.add_argument("-n", "--limit", type=int, default=500)
     s.set_defaults(fn=cmd_stats)
+
+    s = sub.add_parser("bt", help="策略回测：list / eval / board / holdout（规则见 GOALS.md）")
+    s.add_argument("action", choices=["list", "eval", "board", "holdout"])
+    s.add_argument("strategies", nargs="*", help="策略名；不填则评测全部")
+    s.add_argument("-g", "--group", choices=["stocks", "crypto"])
+    s.add_argument("--record", help="把本次评测记为一次实验，填写假设描述")
+    s.add_argument("--change", help="实验改动说明")
+    s.add_argument("--conclusion", help="实验结论")
+    s.add_argument("--crown", action="store_true", help="若判定可采纳，则设为该组新冠军")
+    s.add_argument("-v", "--verbose", action="store_true", help="显示每年选择的参数和各资产表现")
+    s.set_defaults(fn=cmd_bt)
 
     s = sub.add_parser("show", help="查看某条历史报告")
     s.add_argument("id", type=int)
