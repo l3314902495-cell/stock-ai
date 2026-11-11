@@ -1,0 +1,290 @@
+{
+  "source_commit": "b57ba3dd4b2248918f6a5fcb8b4ed2051b94e8df",
+  "purpose": "独立复核远端已补录的实验 #4；与 7f3f4d9 的数字一致，不新增实验或覆盖记分牌",
+  "experiment": 4,
+  "results": [
+    {
+      "strategy": "sma_trend_btcfilter",
+      "group": "crypto",
+      "holdout": false,
+      "period": [
+        "2018-01-01",
+        "2024-12-31"
+      ],
+      "metrics": {
+        "cagr": 0.46627327524591644,
+        "vol": 0.5394084319787027,
+        "sharpe": 0.9709082447322019,
+        "max_dd": -0.6531989493269341,
+        "calmar": 0.7138304121988734,
+        "total_return": 13.60209602498945,
+        "years": 7.01,
+        "trades": 238,
+        "exposure": 0.42422429621577196
+      },
+      "chosen_params": [
+        {
+          "year": 2018,
+          "params": {
+            "n": 200
+          }
+        },
+        {
+          "year": 2019,
+          "params": {
+            "n": 150
+          }
+        },
+        {
+          "year": 2020,
+          "params": {
+            "n": 150
+          }
+        },
+        {
+          "year": 2021,
+          "params": {
+            "n": 100
+          }
+        },
+        {
+          "year": 2022,
+          "params": {
+            "n": 100
+          }
+        },
+        {
+          "year": 2023,
+          "params": {
+            "n": 150
+          }
+        },
+        {
+          "year": 2024,
+          "params": {
+            "n": 150
+          }
+        }
+      ],
+      "per_asset": {
+        "BTC-USD": {
+          "cagr": 0.3620904235390707,
+          "max_dd": -0.6648444976539694,
+          "sharpe": 0.8918123099010877,
+          "trades": 25,
+          "exposure": 0.5154477903793508
+        },
+        "ETH-USD": {
+          "cagr": 0.6184671312220449,
+          "max_dd": -0.6299339304075908,
+          "sharpe": 1.148800346407014,
+          "trades": 23,
+          "exposure": 0.498728813559322
+        },
+        "LTC-USD": {
+          "cagr": -0.07737676235924973,
+          "max_dd": -0.8304714972626195,
+          "sharpe": 0.19439607743626763,
+          "trades": 49,
+          "exposure": 0.3820883848259679
+        },
+        "XRP-USD": {
+          "cagr": 0.11605065767412248,
+          "max_dd": -0.7880256994990764,
+          "sharpe": 0.499028264476141,
+          "trades": 45,
+          "exposure": 0.3466101694915254
+        },
+        "BNB-USD": {
+          "cagr": 0.6834786916918931,
+          "max_dd": -0.7052574965784444,
+          "sharpe": 1.0941010883534716,
+          "trades": 33,
+          "exposure": 0.46864406779661016
+        },
+        "ADA-USD": {
+          "cagr": 0.5177069136555534,
+          "max_dd": -0.7736499166987703,
+          "sharpe": 0.9505154587669976,
+          "trades": 31,
+          "exposure": 0.37457627118644066
+        },
+        "DOGE-USD": {
+          "cagr": 1.0649882252052296,
+          "max_dd": -0.8624192982853005,
+          "sharpe": 0.8555960809597837,
+          "trades": 32,
+          "exposure": 0.3834745762711864
+        }
+      },
+      "benchmark": {
+        "cagr": 0.46943235269884664,
+        "vol": 0.8014740030252951,
+        "sharpe": 0.880157395941305,
+        "max_dd": -0.8726039086676847,
+        "calmar": 0.5379672816451037,
+        "total_return": 13.8239202864665,
+        "years": 7.01,
+        "trades": 7,
+        "exposure": 1.0
+      },
+      "score": 1.3269030228306458,
+      "sharpe_vs_bench": 0.0907508487908969,
+      "guardrails": {
+        "not_benchmark": true,
+        "causal": true,
+        "min_trades": true,
+        "max_dd": false,
+        "min_cagr": true
+      },
+      "passes": false,
+      "causality_detail": null,
+      "param_changes": 3
+    },
+    {
+      "strategy": "donchian_btcfilter",
+      "group": "crypto",
+      "holdout": false,
+      "period": [
+        "2018-01-01",
+        "2024-12-31"
+      ],
+      "metrics": {
+        "cagr": 0.4234329038617841,
+        "vol": 0.3660019562653114,
+        "sharpe": 1.149516747633803,
+        "max_dd": -0.4756592333241023,
+        "calmar": 0.8902022166218889,
+        "total_return": 10.863127760883053,
+        "years": 7.01,
+        "trades": 218,
+        "exposure": 0.2919104703321178
+      },
+      "chosen_params": [
+        {
+          "year": 2018,
+          "params": {
+            "k": 2.0,
+            "n": 20
+          }
+        },
+        {
+          "year": 2019,
+          "params": {
+            "k": 2.0,
+            "n": 20
+          }
+        },
+        {
+          "year": 2020,
+          "params": {
+            "k": 3.0,
+            "n": 20
+          }
+        },
+        {
+          "year": 2021,
+          "params": {
+            "k": 3.0,
+            "n": 55
+          }
+        },
+        {
+          "year": 2022,
+          "params": {
+            "k": 3.0,
+            "n": 20
+          }
+        },
+        {
+          "year": 2023,
+          "params": {
+            "k": 3.0,
+            "n": 20
+          }
+        },
+        {
+          "year": 2024,
+          "params": {
+            "k": 2.0,
+            "n": 20
+          }
+        }
+      ],
+      "per_asset": {
+        "BTC-USD": {
+          "cagr": 0.24998019710990693,
+          "max_dd": -0.43377651806041684,
+          "sharpe": 0.8252652224864786,
+          "trades": 34,
+          "exposure": 0.3191239734063355
+        },
+        "ETH-USD": {
+          "cagr": 0.48736397490877303,
+          "max_dd": -0.5188354800411445,
+          "sharpe": 1.0810082251140791,
+          "trades": 29,
+          "exposure": 0.3432203389830508
+        },
+        "LTC-USD": {
+          "cagr": -0.12100515032141368,
+          "max_dd": -0.8715817146979981,
+          "sharpe": -0.006729350373486288,
+          "trades": 33,
+          "exposure": 0.2577238951896754
+        },
+        "XRP-USD": {
+          "cagr": 0.3490797192096029,
+          "max_dd": -0.626246496337159,
+          "sharpe": 0.7903059073209011,
+          "trades": 30,
+          "exposure": 0.22923728813559321
+        },
+        "BNB-USD": {
+          "cagr": 0.3585481099673713,
+          "max_dd": -0.608895709968087,
+          "sharpe": 0.7953615664012683,
+          "trades": 33,
+          "exposure": 0.3271186440677966
+        },
+        "ADA-USD": {
+          "cagr": 0.6773741663314667,
+          "max_dd": -0.6589333423254635,
+          "sharpe": 1.147959202772049,
+          "trades": 29,
+          "exposure": 0.29703389830508475
+        },
+        "DOGE-USD": {
+          "cagr": 0.6641564312052095,
+          "max_dd": -0.6852964579279852,
+          "sharpe": 0.9387389480432905,
+          "trades": 30,
+          "exposure": 0.2699152542372881
+        }
+      },
+      "benchmark": {
+        "cagr": 0.46943235269884664,
+        "vol": 0.8014740030252951,
+        "sharpe": 0.880157395941305,
+        "max_dd": -0.8726039086676847,
+        "calmar": 0.5379672816451037,
+        "total_return": 13.8239202864665,
+        "years": 7.01,
+        "trades": 7,
+        "exposure": 1.0
+      },
+      "score": 1.654751593627871,
+      "sharpe_vs_bench": 0.26935935169249803,
+      "guardrails": {
+        "not_benchmark": true,
+        "causal": true,
+        "min_trades": true,
+        "max_dd": true,
+        "min_cagr": true
+      },
+      "passes": true,
+      "causality_detail": null,
+      "param_changes": 4
+    }
+  ]
+}

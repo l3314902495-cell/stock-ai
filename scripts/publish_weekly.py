@@ -1,59 +1,91 @@
-"""每周优化会话结束时运行：推送 optimize/research，确保长期 PR 存在，并把周报作为评论发到 PR 上。
+"""Push research and publish an idempotent PR report using REST only.
 
-用法：python scripts/publish_weekly.py report.md
-（云端会话不能用 GitHub GraphQL，所以这里只用 REST：gh api。report.md 不要提交。）
+Usage: python scripts/publish_weekly.py report.md
+Failures retain the session lock; fix the error and retry the same report.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+from pathlib import Path
 import subprocess
 import sys
 
+from weekly import BRANCH, ROOT, git, owned_lock, release, run, validate_records
+
 REPO = "l3314902495-cell/stock-ai"
-BRANCH = "optimize/research"
 PR_TITLE = "持续优化：规则策略研究（长期 PR）"
-PR_BODY = """这是持续优化的长期 PR。每周的定时会话都在 `optimize/research` 分支上接着做一个实验，并在这里以评论的形式发周报。
+PR_BODY = """每周继续 `optimize/research` 的研究，周报以评论追加在本 PR。
 
-- 目标与规则：GOALS.md
-- 全部实验记录：optimize/EXPERIMENTS.md
-- 待验证假设：optimize/BACKLOG.md
-- 当前冠军：optimize/scoreboard.json（或运行 `stockai bt board`）
+- 目标：GOALS.md
+- 实验：optimize/EXPERIMENTS.md
+- 假设：optimize/BACKLOG.md
+- 暂定冠军：optimize/scoreboard.json（待所有者审核）
+- 操作及恢复：scripts/RESEARCH.md
 
-可以随时合并；合并后下一次会话会从新的 main 继续在同一分支上工作。"""
+由所有者决定何时合并。合并后保留研究分支；PR 若已合并，下一次有新提交时自动新建承接 PR。"""
 
 
-def run(*args: str, check: bool = True) -> str:
-    r = subprocess.run(args, capture_output=True, text=True)
-    if check and r.returncode != 0:
-        sys.exit(f"命令失败：{' '.join(args)}\n{r.stdout}\n{r.stderr}")
-    return r.stdout.strip()
+def api(endpoint: str, payload: dict | None = None, paginate: bool = False):
+    args = ["gh", "api", endpoint]
+    if paginate:
+        args += ["--paginate", "--slurp"]
+    if payload is not None:
+        args += ["--method", "POST", "--input", "-"]
+    result = json.loads(run(*args, input=json.dumps(payload, ensure_ascii=False) if payload is not None else None))
+    return [item for page in result for item in page] if paginate else result
+
+
+def research_pr() -> dict:
+    owner = REPO.split("/")[0]
+    endpoint = f"repos/{REPO}/pulls?state=open&base=main&head={owner}:{BRANCH}"
+    prs = api(endpoint)
+    if len(prs) > 1:
+        raise RuntimeError("发现多个研究 PR，请核对后再发布")
+    if prs:
+        return prs[0]
+    try:
+        return api(f"repos/{REPO}/pulls", {"title": PR_TITLE, "head": BRANCH, "base": "main", "body": PR_BODY})
+    except RuntimeError:
+        # A retry or another publisher may already have created it.
+        prs = api(endpoint)
+        if len(prs) == 1:
+            return prs[0]
+        raise
+
+
+def publish(report_path: Path) -> str:
+    report = report_path.read_text(encoding="utf-8").strip()
+    if not report:
+        raise RuntimeError("周报不能为空")
+    if git("branch", "--show-current") != BRANCH:
+        raise RuntimeError(f"请先切到 {BRANCH} 分支")
+    owned_lock()
+    if git("status", "--porcelain"):
+        raise RuntimeError("还有未提交或未跟踪成果，请先提交；周报放在忽略的 report.md 或仓库外")
+    if (report_path.resolve().is_relative_to(ROOT.resolve())
+            and git("ls-files", "--", str(report_path.resolve().relative_to(ROOT.resolve())).replace("\\", "/"))):
+        raise RuntimeError("周报应为临时文件，不应提交到仓库")
+    validate_records()
+    # Competing updates require reconciliation, never force push.
+    git("push", "-u", "origin", BRANCH)
+    pr = research_pr()
+    marker = f"<!-- stockai-weekly:{git('rev-parse', 'HEAD')}:{hashlib.sha256(report.encode()).hexdigest()} -->"
+    endpoint = f"repos/{REPO}/issues/{pr['number']}/comments"
+    comments = api(endpoint + "?per_page=100", paginate=True)
+    if not any(marker in c.get("body", "") for c in comments):
+        api(endpoint, {"body": report + "\n\n" + marker})
+    release()
+    return pr["html_url"]
 
 
 def main() -> None:
     if len(sys.argv) != 2:
         sys.exit("用法：python scripts/publish_weekly.py report.md")
-    report = open(sys.argv[1], encoding="utf-8").read()
-    if run("git", "rev-parse", "--abbrev-ref", "HEAD") != BRANCH:
-        sys.exit(f"请在 {BRANCH} 分支上运行（先执行 bash scripts/start_weekly.sh）")
-    if run("git", "status", "--porcelain", "--untracked-files=no"):
-        sys.exit("还有未提交的改动，请先提交")
-    for attempt in range(4):
-        r = subprocess.run(["git", "push", "-u", "origin", BRANCH], capture_output=True, text=True)
-        if r.returncode == 0:
-            break
-        if attempt == 3:
-            sys.exit(f"推送失败：{r.stderr}")
-        subprocess.run(["sleep", str(2 ** (attempt + 1))])
-    owner = REPO.split("/")[0]
-    prs = json.loads(run("gh", "api", f"repos/{REPO}/pulls?state=open&head={owner}:{BRANCH}"))
-    if prs:
-        num, url = prs[0]["number"], prs[0]["html_url"]
-    else:
-        pr = json.loads(run("gh", "api", f"repos/{REPO}/pulls", "-f", f"title={PR_TITLE}", "-f", f"head={BRANCH}",
-                            "-f", "base=main", "-f", f"body={PR_BODY}"))
-        num, url = pr["number"], pr["html_url"]
-    run("gh", "api", f"repos/{REPO}/issues/{num}/comments", "-f", f"body={report}")
-    print(f"已推送并发布周报：{url}")
+    try:
+        print(f"已推送并发布周报：{publish(Path(sys.argv[1]))}")
+    except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+        sys.exit(f"{exc}\n发布未完成；保留会话锁和本地提交，请修复后重试。")
 
 
 if __name__ == "__main__":
