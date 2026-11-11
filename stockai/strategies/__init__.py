@@ -64,6 +64,11 @@ def reference(df: pd.DataFrame, symbol: str, field: str = "Close") -> pd.Series:
 
     遵守验证集锁（与被评测资产使用同一数据范围），并且只向前填充，不会引入未来数据。
     """
+    if df.attrs.get("live"):  # 实盘信号：参考标的也用实时日线
+        from ..backtest.live import live_daily
+
+        ref = live_daily(symbol)[field]
+        return ref.reindex(ref.index.union(df.index)).ffill().reindex(df.index)
     from ..backtest import data
 
     ref = data.load(symbol, holdout=bool(df.attrs.get("holdout", False)))[field]

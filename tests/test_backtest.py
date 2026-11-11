@@ -111,3 +111,29 @@ def test_reference_helper_is_causal_and_respects_holdout():
         assert strategies.reference(df, "BTC-USD").index.max() < data.HOLDOUT_START
     finally:
         strategies.REGISTRY.pop("_btc_filter_test", None)
+
+
+def test_live_signals_use_live_data_for_reference(monkeypatch):
+    from stockai.backtest import live
+
+    calls = []
+
+    def fake_live(symbol, drop_incomplete=True):
+        calls.append(symbol)
+        df = data.load(symbol).iloc[-400:].copy()
+        df.attrs["live"] = True
+        return df
+
+    monkeypatch.setattr(live, "live_daily", fake_live)
+
+    @strategies.register("_live_ref_test", groups=("crypto",))
+    def f(df):
+        btc = strategies.reference(df, "BTC-USD")
+        return (btc > btc.rolling(50).mean()).astype(float)
+
+    try:
+        res = live.signals("_live_ref_test", "crypto")
+        assert len(res["rows"]) == len(data.GROUPS["crypto"]) and all("action" in r for r in res["rows"])
+        assert calls.count("BTC-USD") >= len(data.GROUPS["crypto"])  # 参考标的走实时数据
+    finally:
+        strategies.REGISTRY.pop("_live_ref_test", None)

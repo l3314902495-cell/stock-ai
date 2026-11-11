@@ -282,6 +282,27 @@ def cmd_bt(a):
             t.add_row(name, ",".join(st.groups), grids, st.description)
         console.print(t)
         return
+    if a.action == "signal":
+        from .backtest import live
+
+        for g in groups_for_signal(a):
+            try:
+                with console.status(f"计算 {g} 今日信号…"):
+                    res = live.signals(a.strategies[0] if a.strategies else None, g)
+            except ValueError as e:
+                console.print(f"[yellow]{g}：{e}[/yellow]")
+                continue
+            t = Table("标的", "数据日期", "收盘", "目标仓位", "昨日仓位", "操作", title=f"{g} · {res['strategy']} · 参数 {res['params']}")
+            for r in res["rows"]:
+                if "error" in r:
+                    t.add_row(r["symbol"], "-", "-", "-", "-", f"[red]{r['error'][:40]}[/red]")
+                    continue
+                c = {"买入": "green", "加仓": "green", "卖出": "red", "减仓": "red"}.get(r["action"], "white")
+                t.add_row(r["symbol"], r["date"], str(r["close"]), f"{r['position']:.0%}", f"{r['prev_position']:.0%}",
+                          f"[{c}]{r['action']}[/{c}]")
+            console.print(t)
+            console.print(f"[dim]该组总仓位 {res['portfolio_exposure']:.0%}。{res['note']}。回测表现不代表未来收益。[/dim]")
+        return
     if a.action == "board":
         sb = ev.load_scoreboard()
         console.print(f"累计实验：{sb.get('experiments', 0)} 次")
@@ -319,6 +340,10 @@ def cmd_bt(a):
             if ev.judge(r)["accept"]:
                 ev.crown(r, a.change or a.record or "")
                 console.print(f"[bold green]{r['strategy']} 成为 {r['group']} 新冠军[/bold green]")
+
+
+def groups_for_signal(a) -> list[str]:
+    return [a.group] if a.group else ["stocks", "crypto"]
 
 
 def cmd_show(a):
@@ -428,8 +453,8 @@ def main(argv=None):
     s.add_argument("-n", "--limit", type=int, default=500)
     s.set_defaults(fn=cmd_stats)
 
-    s = sub.add_parser("bt", help="策略回测：list / eval / board / holdout（规则见 GOALS.md）")
-    s.add_argument("action", choices=["list", "eval", "board", "holdout"])
+    s = sub.add_parser("bt", help="策略回测：list / eval / board / signal（今日信号）/ holdout（规则见 GOALS.md）")
+    s.add_argument("action", choices=["list", "eval", "board", "holdout", "signal"])
     s.add_argument("strategies", nargs="*", help="策略名；不填则评测全部")
     s.add_argument("-g", "--group", choices=["stocks", "crypto"])
     s.add_argument("--record", help="把本次评测记为一次实验，填写假设描述")
