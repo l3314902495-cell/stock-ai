@@ -247,6 +247,8 @@ def summarize(df: pd.DataFrame, interval: str, recent_bars: int = 8, asset_type:
             for idx, r_ in df.iloc[-recent_bars:].iterrows()
         ],
     }
+    if df.attrs.get("bad_ticks_fixed"):
+        out["data_note"] = f"已用日线高低点修正 {df.attrs['bad_ticks_fixed']} 根异常日内K线"
     status = last_bar_status(df, interval, asset_type)
     if not status["complete"]:
         p = status["progress"]

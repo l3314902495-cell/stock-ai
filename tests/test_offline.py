@@ -1,5 +1,6 @@
 """离线单元测试：只测计算逻辑，不访问网络。运行：pytest -q"""
 import numpy as np
+import pytest
 import pandas as pd
 
 from stockai.analytics import technicals as ta
@@ -153,3 +154,22 @@ def test_cache_skips_nocache(tmp_path):
     assert f("ok") == {"v": "ok"} and f("ok") == {"v": "ok"}
     assert calls == ["bad", "bad", "ok"]
     cache._conn = None
+
+
+def test_clip_intraday_bad_ticks(monkeypatch):
+    from stockai.data import us_stock
+
+    idx = pd.DatetimeIndex(["2026-11-10 09:30", "2026-11-10 12:30"]).tz_localize("America/New_York")
+    intraday = pd.DataFrame({"Open": [174.0, 167.5], "High": [174.6, 178.67], "Low": [170.1, 166.2],
+                             "Close": [171.4, 168.89], "Volume": [1, 1]}, index=idx)  # 当天最后收盘 = 日线收盘
+    daily = pd.DataFrame({"Open": [174.0], "High": [174.69], "Low": [165.89], "Close": [168.89], "Volume": [1]},
+                         index=pd.DatetimeIndex(["2026-11-10"]).tz_localize("America/New_York"))
+    monkeypatch.setattr(us_stock, "history", lambda t, iv="1d", p=None: daily)
+    out = us_stock._clip_to_daily(intraday, "X")
+    assert out["High"].iloc[1] == pytest.approx(174.69) and out["High"].iloc[0] == 174.6
+    assert out.attrs["bad_ticks_fixed"] == 1
+    # 日线与日内复权口径不同（这里差 3%）时，不应把正常 K 线误判为坏点
+    shifted = intraday.copy()
+    shifted[["Open", "High", "Low", "Close"]] *= 0.97
+    shifted.loc[shifted.index[1], "High"] = 174.6 * 0.97
+    assert us_stock._clip_to_daily(shifted, "X").attrs["bad_ticks_fixed"] == 0
