@@ -97,3 +97,17 @@ def test_walk_forward_is_out_of_sample():
     r = ev.walk_forward("sma_trend", "stocks")
     assert r["period"][0].startswith("2008") and r["period"][1] < str(data.HOLDOUT_START.date())
     assert [c["year"] for c in r["chosen_params"]] == list(range(2008, 2025))
+
+
+def test_reference_helper_is_causal_and_respects_holdout():
+    @strategies.register("_btc_filter_test", groups=("crypto",))
+    def f(df):
+        btc = strategies.reference(df, "BTC-USD")
+        return (btc > btc.rolling(200).mean()).astype(float)
+
+    try:
+        assert ev.causality_check("_btc_filter_test", "crypto")["ok"]
+        df = data.load("ETH-USD")
+        assert strategies.reference(df, "BTC-USD").index.max() < data.HOLDOUT_START
+    finally:
+        strategies.REGISTRY.pop("_btc_filter_test", None)

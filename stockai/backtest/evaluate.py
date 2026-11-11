@@ -33,6 +33,7 @@ ACCEPT_MARGIN = 0.05       # 新策略主指标需超过现任冠军 5% 才算�
 def _asset_run(strategy: str, symbol: str, params_key: str, holdout: bool) -> pd.DataFrame:
     st = strategies.get(strategy)
     df = data.load(symbol, holdout=holdout)
+    df.attrs["holdout"] = holdout  # 供 strategies.reference() 使用同一数据范围
     params = json.loads(params_key)
     sig = st.signal(df, **params)
     grp = data.group_of(symbol)
