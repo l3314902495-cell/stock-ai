@@ -8,6 +8,7 @@ AI 美股/加密货币分析工具（个人研究用）。用户偏好中文交�
 
 目标和规则以 **GOALS.md** 为准。每次优化会话按以下步骤执行：
 
+0. **切到研究分支**：`bash scripts/start_weekly.sh`。所有优化会话都在同一条长期分支 `optimize/research` 上接着做（它包含此前所有未合并的实验），不要另开分支。
 1. **读取现状**：GOALS.md、`optimize/BACKLOG.md`、`optimize/EXPERIMENTS.md` 最近 5 条、`stockai bt board`。
 2. **检查停止条件**：如果最近连续 4 个优化会话都没有"✅ 可采纳"的结果，本次**不做实验**，只写报告，总结尝试过的方向和失败原因，提出 2~3 个新方向请所有者选择。
 3. **季度检查**：如果当前是 1/4/7/10 月的第一次会话，且有冠军，运行 `stockai bt holdout <冠军> -g <组>`，把结果写进报告；冠军验证集 score < 1 或回撤护栏失败时标记"疑似过拟合"。平时**禁止**运行 holdout，也不要用任何方式读取 2025 年之后的数据。
@@ -18,10 +19,9 @@ AI 美股/加密货币分析工具（个人研究用）。用户偏好中文交�
    `stockai bt eval <新策略> [-g 组] --record "<假设>" --change "<改动>" --conclusion "<结论>"`；
    判定为可采纳时加 `--crown`。**每次评测都必须 --record**，包括失败的变体。
 7. **更新 BACKLOG**：把完成的条目移到"已完成"，注明实验编号和结论；根据结果补充新假设。
-8. **提交**：在分支 `optimize/<YYYY-MM-DD>` 上提交，推送并创建 PR。**不要合并**，由所有者审核。
-   注意：云端会话不能用 GitHub GraphQL，`gh pr create` / `gh pr list` 会失败，要用 REST 接口：
-   `gh api repos/l3314902495-cell/stock-ai/pulls -f title="..." -f head="optimize/<日期>" -f base=main -F body=@pr_body.md`
-   （先把 PR 描述写进临时文件 pr_body.md，不要提交它）。
+8. **提交并发布**：在 `optimize/research` 上提交（可以多次提交），然后把周报按下面的模板写进临时文件 `report.md`（不要提交它），运行
+   `python scripts/publish_weekly.py report.md`。脚本会推送分支、确保长期 PR 存在，并把周报作为评论发到这个 PR 上。
+   **不要合并 PR**，由所有者审核。不要用 `gh pr create`（云端会话不能用 GraphQL，会失败）。
 
 ### 禁止修改（发现问题只在报告里指出，单独提 PR）
 
@@ -29,7 +29,7 @@ AI 美股/加密货币分析工具（个人研究用）。用户偏好中文交�
 - 已有策略的实现（只能新增）
 - 资产池、成本、样本外区间、护栏数值
 
-### PR 描述 / 每周报告模板
+### 每周报告模板（发到长期 PR 的评论里）
 
 ```
 ## 本周假设
