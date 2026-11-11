@@ -19,6 +19,9 @@ AI 美股/加密货币分析工具（个人研究用）。用户偏好中文交�
    判定为可采纳时加 `--crown`。**每次评测都必须 --record**，包括失败的变体。
 7. **更新 BACKLOG**：把完成的条目移到"已完成"，注明实验编号和结论；根据结果补充新假设。
 8. **提交**：在分支 `optimize/<YYYY-MM-DD>` 上提交，推送并创建 PR。**不要合并**，由所有者审核。
+   注意：云端会话不能用 GitHub GraphQL，`gh pr create` / `gh pr list` 会失败，要用 REST 接口：
+   `gh api repos/l3314902495-cell/stock-ai/pulls -f title="..." -f head="optimize/<日期>" -f base=main -F body=@pr_body.md`
+   （先把 PR 描述写进临时文件 pr_body.md，不要提交它）。
 
 ### 禁止修改（发现问题只在报告里指出，单独提 PR）
 
