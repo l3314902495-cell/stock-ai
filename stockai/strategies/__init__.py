@@ -76,4 +76,4 @@ def get(name: str) -> Strategy:
     return REGISTRY[name]
 
 
-from . import baseline, exp_trend  # noqa: E402,F401  注册内置策略与实验策略
+from . import baseline, exp_crypto, exp_trend  # noqa: E402,F401  注册内置策略与实验策略
