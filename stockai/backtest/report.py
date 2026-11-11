@@ -27,8 +27,10 @@ def summary_line(r: dict[str, Any]) -> str:
             + ("护栏全部通过" if not fails else "未通过：" + "、".join(fails)))
 
 
-def record(results: list[dict[str, Any]], hypothesis: str, change: str = "", conclusion: str = "") -> int:
-    """把一次实验（一个假设，可能涉及多个资产组）写入实验记录，返回累计实验编号。"""
+def record(results: list[dict[str, Any]], hypothesis: str, change: str = "", conclusion: str = "",
+           verdicts: list[dict[str, Any]] | None = None) -> int:
+    """把一次实验（一个假设，可能涉及多个资产组）写入实验记录，返回累计实验编号。
+    verdicts：与 results 一一对应的判定（按顺序加冕时，后面的变体要和前面刚加冕的比较）。"""
     n = bump_experiments()
     EXPERIMENTS.parent.mkdir(parents=True, exist_ok=True)
     if not EXPERIMENTS.exists():
@@ -36,8 +38,8 @@ def record(results: list[dict[str, Any]], hypothesis: str, change: str = "", con
     lines = [f"## #{n} {datetime.now(timezone.utc):%Y-%m-%d}：{hypothesis}", ""]
     if change:
         lines += [f"- 改动：{change}"]
-    for r in results:
-        j = judge(r)
+    for i, r in enumerate(results):
+        j = verdicts[i] if verdicts else judge(r)
         lines += [f"- {summary_line(r)}",
                   f"  - 判定：{'✅ 可采纳' if j['accept'] else '❌ 不采纳'}（{j['reason']}）；参数年度变更 {r['param_changes']} 次"]
     if conclusion:

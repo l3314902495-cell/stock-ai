@@ -1,4 +1,51 @@
 {
- "groups": {},
- "experiments": 2
+ "groups": {
+  "stocks": {
+   "strategy": "sma200_band2",
+   "score": 2.167179273726104,
+   "metrics": {
+    "cagr": 0.07527340425296059,
+    "vol": 0.10492637592112919,
+    "sharpe": 0.7443752585149772,
+    "max_dd": -0.1700153554232584,
+    "calmar": 0.44274473952993926,
+    "total_return": 2.429225109083421,
+    "years": 16.98,
+    "trades": 251,
+    "exposure": 0.7367465439444874
+   },
+   "benchmark": {
+    "cagr": 0.10337681436771962,
+    "max_dd": -0.5060163780136864,
+    "calmar": 0.2042953921244888,
+    "sharpe": 0.5992774813434854
+   },
+   "crowned_at": "2026-11-11",
+   "note": "新增 sma200_band1/2/3：站上均线×(1+x) 才买、跌破均线×(1−x) 才卖，x = 1%/2%/3%；均为单一参数组合"
+  },
+  "crypto": {
+   "strategy": "donchian_btcfilter",
+   "score": 1.654751593627871,
+   "metrics": {
+    "cagr": 0.4234329038617841,
+    "vol": 0.3660019562653114,
+    "sharpe": 1.149516747633803,
+    "max_dd": -0.4756592333241023,
+    "calmar": 0.8902022166218889,
+    "total_return": 10.863127760883053,
+    "years": 7.01,
+    "trades": 218,
+    "exposure": 0.2919104703321178
+   },
+   "benchmark": {
+    "cagr": 0.46943235269884664,
+    "max_dd": -0.8726039086676847,
+    "calmar": 0.5379672816451037,
+    "sharpe": 0.880157395941305
+   },
+   "crowned_at": "2026-11-11",
+   "note": "新增 sma_trend_btcfilter（均线趋势 × BTC 过滤）与 donchian_btcfilter（通道突破+吊灯止损 × BTC 过滤）；跨资产数据通过 strategies.reference 读取"
+  }
+ },
+ "experiments": 4
 }
