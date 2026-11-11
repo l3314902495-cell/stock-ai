@@ -9,3 +9,5 @@ venv/
 .pytest_cache/
 build/
 dist/
+report.md
+pr_body.md
