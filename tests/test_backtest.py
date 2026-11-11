@@ -137,3 +137,24 @@ def test_live_signals_use_live_data_for_reference(monkeypatch):
         assert calls.count("BTC-USD") >= len(data.GROUPS["crypto"])  # 参考标的走实时数据
     finally:
         strategies.REGISTRY.pop("_live_ref_test", None)
+
+
+def test_record_uses_sequential_verdicts(tmp_path, monkeypatch):
+    from stockai.backtest import report
+
+    monkeypatch.setattr(ev, "SCOREBOARD", tmp_path / "sb.json")
+    monkeypatch.setattr(report, "EXPERIMENTS", tmp_path / "exp.md")
+    base = {"group": "stocks", "passes": True, "guardrails": {"causal": True}, "param_changes": 0,
+            "metrics": {"cagr": 0.1, "max_dd": -0.2, "calmar": 0.5, "sharpe": 1.0, "trades": 200},
+            "benchmark": {"cagr": 0.1, "max_dd": -0.5, "calmar": 0.2, "sharpe": 0.6}}
+    results = [{**base, "strategy": "a", "score": 1.0}, {**base, "strategy": "b", "score": 1.02}]
+    verdicts = []
+    for r in results:
+        j = ev.judge(r)
+        verdicts.append(j)
+        if j["accept"]:
+            ev.crown(r)
+    report.record(results, "测试", verdicts=verdicts)
+    text = (tmp_path / "exp.md").read_text()
+    assert text.count("✅") == 1 and "❌" in text
+    assert ev.load_scoreboard()["groups"]["stocks"]["strategy"] == "a"

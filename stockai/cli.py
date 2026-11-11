@@ -324,7 +324,7 @@ def cmd_bt(a):
             j = ev.judge(r)
             color = "green" if r["passes"] else "red"
             console.print(f"[{color}]{report.summary_line(r)}[/{color}]")
-            if a.action == "eval":
+            if a.action == "eval" and not a.crown:  # --crown 时按顺序判定，结果在下面输出
                 console.print(f"  判定：{'✅ 可采纳' if j['accept'] else '❌ 不采纳'}（{j['reason']}）")
             if r.get("causality_detail"):
                 console.print(f"  [red]{r['causality_detail']}[/red]")
@@ -332,14 +332,21 @@ def cmd_bt(a):
                 console.print("  每年参数：" + "；".join(f"{c['year']}:{c['params']}" for c in r["chosen_params"]))
                 for s_, pa in r["per_asset"].items():
                     console.print(f"    {s_:9s} 年化 {report.pct(pa['cagr'])} 回撤 {report.pct(pa['max_dd'])} 交易 {pa['trades']}")
-    if a.action == "eval" and a.record:
-        n = report.record(results, a.record, a.change or "", a.conclusion or "")
-        console.print(f"已记录为实验 #{n}（optimize/EXPERIMENTS.md）")
+    verdicts = None
     if a.action == "eval" and a.crown:
+        # 按顺序判定并加冕：后面的变体要和前面刚加冕的冠军比较
+        verdicts = []
         for r in results:
-            if ev.judge(r)["accept"]:
+            j = ev.judge(r)
+            verdicts.append(j)
+            if j["accept"]:
                 ev.crown(r, a.change or a.record or "")
-                console.print(f"[bold green]{r['strategy']} 成为 {r['group']} 新冠军[/bold green]")
+                console.print(f"[bold green]{r['strategy']} 成为 {r['group']} 新冠军（{j['reason']}）[/bold green]")
+            else:
+                console.print(f"{r['strategy']}：不加冕（{j['reason']}）")
+    if a.action == "eval" and a.record:
+        n = report.record(results, a.record, a.change or "", a.conclusion or "", verdicts)
+        console.print(f"已记录为实验 #{n}（optimize/EXPERIMENTS.md）")
 
 
 def groups_for_signal(a) -> list[str]:

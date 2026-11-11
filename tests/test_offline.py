@@ -140,7 +140,7 @@ def test_verify_units_and_skips():
 def test_cache_skips_nocache(tmp_path):
     from stockai import cache, config
 
-    (tmp_path / "c.yaml").write_text(f'{{"cache": {{"path": "{tmp_path / "c.db"}"}}}}')
+    (tmp_path / "c.yaml").write_text(f'{{"cache": {{"path": "{(tmp_path / "c.db").as_posix()}"}}}}')
     config.load_config(str(tmp_path / "c.yaml"))
     cache._conn = None
     calls = []
