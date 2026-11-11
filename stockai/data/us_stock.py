@@ -57,20 +57,53 @@ def _history_raw(ticker: str, interval: str, period: str) -> pd.DataFrame:
     return df
 
 
+def _clip_to_daily(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    """Yahoo 分钟/小时线偶有坏点（如某根 K 线的最高价等于前一天收盘价）。
+    用同一交易日的日线高低点（汇总数据，更可靠）裁剪日内 K 线，修正数量记在 attrs["bad_ticks_fixed"]。
+
+    日线和日内数据的分红复权口径不同（老数据差 0.1%~数%），所以先用"当天日内最后收盘 / 日线收盘"
+    把日线高低点换算到日内口径，再比较。"""
+    try:
+        daily = history(ticker, "1d")
+    except Exception:
+        return df
+    idx = df.index.tz_convert("America/New_York") if df.index.tz is not None else df.index
+    day = pd.DatetimeIndex(idx.date)
+    d_idx = daily.index.tz_localize(None) if daily.index.tz is not None else daily.index
+    d = daily.set_axis(d_idx.normalize())
+    last_close = df["Close"].groupby(day).last()
+    factor = (last_close / d["Close"].reindex(last_close.index)).reindex(day).values
+    hi = d["High"].reindex(day).values * factor
+    lo = d["Low"].reindex(day).values * factor
+    out = df.copy()
+    tol = 0.002  # 0.2%：换算后仍超出日线区间这么多才算坏点
+    bad_hi = (out["High"].values > hi * (1 + tol)) & ~np.isnan(hi)
+    bad_lo = (out["Low"].values < lo * (1 - tol)) & ~np.isnan(lo)
+    if bad_hi.any():
+        out.loc[bad_hi, "High"] = np.maximum(hi[bad_hi], out.loc[bad_hi, ["Open", "Close"]].max(axis=1).values)
+    if bad_lo.any():
+        out.loc[bad_lo, "Low"] = np.minimum(lo[bad_lo], out.loc[bad_lo, ["Open", "Close"]].min(axis=1).values)
+    out.attrs["bad_ticks_fixed"] = int(bad_hi.sum() + bad_lo.sum())
+    return out
+
+
 def history(ticker: str, interval: str = "1d", period: str | None = None) -> pd.DataFrame:
-    """统一 OHLCV。interval: 15m/30m/1h/4h/1d/1wk。4h 由 1h 重采样。"""
+    """统一 OHLCV。interval: 15m/30m/1h/4h/1d/1wk。4h 由 1h 重采样。日内数据会用日线高低点修正坏点。"""
     key_interval = interval
 
     @cached(ttl=_TTL.get(interval, 600))
     def _load(ticker: str, interval: str, period: str | None) -> pd.DataFrame:
         if interval == "4h":
-            df = _history_raw(ticker, "1h", period or "730d")
+            df = _clip_to_daily(_history_raw(ticker, "1h", period or "730d"), ticker)
             agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
             # 按交易日内 4 小时切分（美股 9:30 开盘：9:30-13:30, 13:30-16:00）
             df = df.resample("4h", offset="1h30min").agg(agg).dropna(subset=["Close"])
             return df
         p = period or {"1d": "5y", "1wk": "max"}.get(interval) or _MAX_PERIOD.get(interval, "1y")
-        return _history_raw(ticker, interval, p)
+        df = _history_raw(ticker, interval, p)
+        if interval not in ("1d", "1wk"):
+            df = _clip_to_daily(df, ticker)
+        return df
 
     return _load(ticker.upper(), key_interval, period)
 
@@ -80,7 +113,7 @@ def _fast(ticker: str) -> dict[str, Any]:
     def build():
         fi = _tk(ticker).fast_info
         out = {"last_price": fi["last_price"]}  # 第一次访问触发请求；限流时在这里抛出并重试
-        for k in ("previous_close", "open", "day_high", "day_low", "last_volume",
+        for k in ("regular_market_previous_close", "previous_close", "open", "day_high", "day_low", "last_volume",
                   "ten_day_average_volume", "three_month_average_volume", "year_high", "year_low",
                   "market_cap", "fifty_day_average", "two_hundred_day_average", "currency", "exchange"):
             try:
@@ -114,8 +147,11 @@ def info(ticker: str) -> dict[str, Any]:
 def quote(ticker: str) -> dict[str, Any]:
     f = _fast(ticker)
     i = info(ticker)
-    last, prev = f.get("last_price"), f.get("previous_close")
+    last = f.get("last_price")
+    # 注意：fast_info.previous_close 在盘前/盘后经常不是上一常规交易日收盘价，优先用 regular_market_previous_close
+    prev = i.get("regularMarketPreviousClose") or f.get("regular_market_previous_close") or f.get("previous_close")
     chg = (last / prev - 1) if last and prev else None
+    pre, post = i.get("preMarketPrice"), i.get("postMarketPrice")
     out = {
         "symbol": ticker.upper(),
         "name": i.get("shortName"),
@@ -131,8 +167,11 @@ def quote(ticker: str) -> dict[str, Any]:
         "volume_vs_3m_avg": num(f["last_volume"] / f["three_month_average_volume"])
         if f.get("last_volume") and f.get("three_month_average_volume") else None,
         "market_cap": big(f.get("market_cap")),
-        "pre_market": num(i.get("preMarketPrice")),
-        "post_market": num(i.get("postMarketPrice")),
+        "previous_close": num(prev),
+        "pre_market": num(pre),
+        "pre_market_change_pct": pct(pre / last - 1) if pre and last and i.get("marketState") in ("PRE", "PREPRE") else None,
+        "post_market": num(post),
+        "post_market_change_pct": pct(post / last - 1) if post and last and i.get("marketState") in ("POST", "POSTPOST", "CLOSED") else None,
         "market_state": i.get("marketState"),
         "sector": i.get("sector"),
         "industry": i.get("industry"),
