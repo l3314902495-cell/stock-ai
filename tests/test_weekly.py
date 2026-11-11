@@ -206,3 +206,29 @@ def test_publish_rejects_untracked_strategy(repos, tmp_path):
         publisher.publish(report)
     assert not git(a, "ls-remote", "--heads", "origin", weekly.BRANCH)
     weekly.release()
+
+
+def test_lock_branch_is_append_only(repos):
+    """云端 git 代理禁止删除/强推远端引用，锁只能靠追加提交来释放。"""
+    remote, a, _ = repos
+    weekly.start()
+    held = weekly.lock_tip()
+    weekly.release()
+    tip = weekly.lock_tip()
+    assert tip and tip != held and not weekly.remote_lock()
+    assert git(a, "log", "-1", "--format=%s", tip).startswith("RELEASED")
+    assert git(a, "merge-base", "--is-ancestor", held, tip) == ""  # 释放是快进，没有改写历史
+
+
+def test_force_release_by_owner(repos, monkeypatch):
+    _, a, b = repos
+    weekly.start()
+    monkeypatch.setattr(weekly, "ROOT", b)
+    weekly.identity()
+    with pytest.raises(RuntimeError, match="其他会话"):
+        weekly.acquire()
+    weekly.force_release()
+    assert not weekly.remote_lock()
+    weekly.start()
+    assert weekly.remote_lock()
+    weekly.release()

@@ -1,4 +1,9 @@
-"""Shared lifecycle for serialized research sessions; the remote tag is a mutex."""
+"""Shared lifecycle for serialized research sessions; a remote branch is the mutex.
+
+锁是远端分支 stockai-research-lock，它只增不删：最新提交说明以 LOCKED 开头表示被占用，
+RELEASED 表示空闲。取锁 = 在观察到的空闲提交上追加 LOCKED 提交并普通推送；如果期间别人先取了锁，
+我们的推送不是快进，会被远端拒绝，因此仍是原子的互斥。释放 = 追加 RELEASED 提交。
+整个过程只用普通推送（不删除、不强推），因为云端会话的 git 代理禁止推送 tag、删除和强推远端引用。"""
 from __future__ import annotations
 
 import argparse
@@ -10,7 +15,7 @@ import time
 import uuid
 
 BRANCH = "optimize/research"
-LOCK_REF = "refs/tags/stockai-research-lock"
+LOCK_REF = "refs/heads/stockai-research-lock"
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -33,10 +38,27 @@ def state_path() -> Path:
     return path if path.is_absolute() else ROOT / path
 
 
-def remote_lock() -> str:
-    # Network/auth errors must never be treated as an absent lock.
+def lock_tip() -> str:
+    """锁分支当前的提交（不存在时为空）。网络/认证错误会抛出，绝不当作"没有锁"。"""
     output = git("ls-remote", "--refs", "origin", LOCK_REF)
     return output.split()[0] if output else ""
+
+
+def _held(sha: str) -> bool:
+    if subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=ROOT, capture_output=True).returncode:
+        git("fetch", "--no-tags", "-q", "origin", LOCK_REF)  # 本地还没有这个提交对象
+    return git("log", "-1", "--format=%s", sha).startswith("LOCKED")
+
+
+def remote_lock() -> str:
+    """被占用时返回锁提交，空闲时返回空字符串。"""
+    tip = lock_tip()
+    return tip if tip and _held(tip) else ""
+
+
+def _lock_commit(message: str, parent: str) -> str:
+    tree = git("mktree", input="")
+    return git("commit-tree", tree, *(["-p", parent] if parent else []), "-m", message)
 
 
 def owned_lock() -> dict:
@@ -65,18 +87,17 @@ def acquire() -> None:
     path = state_path()
     if path.exists():
         raise RuntimeError("已有本地会话；恢复请用 start --resume，放弃请用 release（保留本地改动）")
-    if remote_lock():
-        raise RuntimeError("其他会话正在研究（远端锁存在），本次停止，不开展实验")
+    tip = lock_tip()  # 同一次观察既用来判断是否空闲，也作为新锁提交的父提交（CAS 的关键）
+    if tip and _held(tip):
+        raise RuntimeError("其他会话正在研究（远端锁被占用），本次停止，不开展实验")
     token = str(uuid.uuid4())
     who = git("var", "GIT_COMMITTER_IDENT")
-    tag = (f"object {git('rev-parse', 'HEAD')}\ntype commit\n"
-           f"tag stockai-research-lock\ntagger {who}\n\nresearch session {token}\n")
-    sha = git("mktag", input=tag)
+    sha = _lock_commit(f"LOCKED research session {token}\n\n{who}", tip)
     # Exclusive local creation prevents two starts in the same checkout.
     with path.open("x", encoding="utf-8") as f:
         json.dump({"sha": sha, "token": token, "created": time.time()}, f)
     try:
-        # No force: remote tag creation is atomic, so only one worker wins.
+        # No force: a fast-forward from the observed tip (or creating the branch) is atomic, so only one worker wins.
         git("push", "origin", f"{sha}:{LOCK_REF}")
     except Exception:
         # Preserve local state if the push outcome is uncertain.
@@ -122,18 +143,40 @@ def start(resume: bool = False) -> None:
 
 def release() -> None:
     state = owned_lock()
-    git("push", f"--force-with-lease={LOCK_REF}:{state['sha']}", "origin", f":{LOCK_REF}")
+    sha = _lock_commit(f"RELEASED research session {state.get('token', '')}", state["sha"])
+    git("push", "origin", f"{sha}:{LOCK_REF}")  # 快进；若锁被别人改动过会被拒绝
     state_path().unlink()
     print("已释放本会话锁；本地文件和提交保留。")
 
 
+def force_release() -> None:
+    """仅供所有者在确认原会话已彻底停止后使用：在当前锁提交上追加 RELEASED（不删除、不强推）。"""
+    tip = lock_tip()
+    if not tip or not _held(tip):
+        print("锁本来就是空闲的。")
+        return
+    sha = _lock_commit(f"RELEASED by owner (forced), previous {tip}", tip)
+    git("push", "origin", f"{sha}:{LOCK_REF}")
+    if state_path().exists():
+        state_path().unlink()
+    print(f"已强制释放锁（原锁提交 {tip[:10]} 已存档在锁分支历史中）。")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["start", "release"])
+    parser.add_argument("action", choices=["start", "release", "force-release"])
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--yes", action="store_true", help="force-release 需要确认")
     args = parser.parse_args()
     try:
-        start(args.resume) if args.action == "start" else release()
+        if args.action == "start":
+            start(args.resume)
+        elif args.action == "release":
+            release()
+        elif not args.yes:
+            parser.exit(1, "force-release 会释放别的会话持有的锁，请先确认原会话已停止，再加 --yes\n")
+        else:
+            force_release()
     except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
         parser.exit(1, f"{exc}\n")
 
